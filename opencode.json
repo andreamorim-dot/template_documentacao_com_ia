@@ -1,0 +1,44 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "anthropic/claude-opus-5",
+  "instructions": [
+    "AGENTS.md",
+    ".claude/skills/pbi-doc-md/SKILL.md",
+    ".claude/skills/pbi-doc-docx/SKILL.md",
+    ".claude/skills/guardrails/SKILL.md"
+  ],
+  "permission": {
+    "read": {
+      "*": "allow",
+      "*.env": "deny",
+      "*.env.*": "deny",
+      "*.env.example": "allow",
+      "*.env.sample": "allow",
+      "*.env.template": "allow",
+      "*.env.dist": "allow",
+      "*.env.tmpl": "allow",
+      "**/.pbi/**": "deny",
+      "*.pbix": "deny",
+      "*.pbit": "deny",
+      "*.abf": "deny",
+      "*.csv": "deny",
+      "*.tsv": "deny",
+      "*.xlsx": "deny",
+      "*.xls": "deny",
+      "*.xlsb": "deny",
+      "*.parquet": "deny",
+      "*.avro": "deny",
+      "*.orc": "deny",
+      "*.accdb": "deny",
+      "*.mdb": "deny",
+      "*.sqlite": "deny",
+      "*.sqlite3": "deny",
+      "*.db": "deny"
+    },
+    "bash": {
+      "*": "ask",
+      "python3 tools/pbidoc/*": "allow",
+      "python3 tools/guardrails/check.py *": "allow"
+    }
+  }
+}

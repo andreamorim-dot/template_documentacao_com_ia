@@ -1,0 +1,44 @@
+{
+  "model": "opusplan",
+  "permissions": {
+    "allow": [
+      "Bash(python3 tools/pbidoc/pbidoc.py:*)",
+      "Bash(python3 tools/pbidoc/make_template.py:*)",
+      "Bash(python3 tools/pbidoc/describe_api.py:*)",
+      "Bash(python3 tools/guardrails/check.py:*)"
+    ],
+    "deny": [
+      "Read(**/.env)",
+      "Read(**/.pbi/**)",
+      "Read(**/*.pbix)",
+      "Read(**/*.pbit)",
+      "Read(**/*.abf)",
+      "Read(**/*.csv)",
+      "Read(**/*.tsv)",
+      "Read(**/*.xlsx)",
+      "Read(**/*.xls)",
+      "Read(**/*.xlsb)",
+      "Read(**/*.parquet)",
+      "Read(**/*.avro)",
+      "Read(**/*.orc)",
+      "Read(**/*.accdb)",
+      "Read(**/*.mdb)",
+      "Read(**/*.sqlite)",
+      "Read(**/*.sqlite3)",
+      "Read(**/*.db)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Read|Edit|Write|MultiEdit|NotebookEdit|Grep|Glob|Bash|mcp__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 tools/guardrails/check.py --hook-claude"
+          }
+        ]
+      }
+    ]
+  }
+}

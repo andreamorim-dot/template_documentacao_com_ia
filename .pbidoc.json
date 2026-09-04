@@ -1,0 +1,17 @@
+{
+  "projetos_dir": "projetos",
+  "docs_dir": "docs",
+  "formatos": ["md", "docx"],
+  "descrever_colunas": true,
+  "modelo": "sonnet",
+  "timeout": 900,
+  "limite_itens_precommit": 120,
+  "subtitulo": "Documentação Técnica do Modelo de Dados",
+  "elaborado_por": "",
+  "revisado_por": "",
+  "link_relatorio": "",
+  "frequencia_atualizacao": "",
+  "objetivo": "",
+  "estilo_docx": {},
+  "projetos": {}
+}

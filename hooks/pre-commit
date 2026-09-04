@@ -1,0 +1,271 @@
+#!/usr/bin/env bash
+#
+# pbidoc — mantém a documentação dos projetos Power BI atualizada a cada commit.
+#
+# Fluxo (barato → caro):
+#   0. guardrails ...................................... BLOQUEIA o commit (exit 1)
+#      se algum arquivo de dado real/segredo estiver em stage — única parte deste
+#      hook que não é "aberta".
+#   1. nenhum arquivo de PBIP em stage ................. sai em ~10 ms, custo zero
+#   2. arquivos mudaram mas nenhuma descrição nova ...... só re-renderiza, custo zero
+#   3. há objetos novos/alterados ........................ chama o assistente local
+#
+# A partir daqui (passo 1 em diante) a falha é sempre "aberta": qualquer erro vira
+# aviso e o commit continua — só o passo 0 (guardrails) e uma falha explícita de
+# leitura/escrita bloqueiam.
+# Escape manual:  PBIDOC_SKIP=1 git commit
+#
+# Variáveis de ambiente:
+#   PBIDOC_SKIP=1        pula o hook inteiro (inclusive os guardrails)
+#   PBIDOC_MODEL=haiku   sobrescreve o modelo definido em .pbidoc.json
+#   PBIDOC_TIMEOUT=900   segundos até desistir da chamada ao assistente
+#   PBIDOC_BACKEND=api   usa ANTHROPIC_API_KEY em vez de uma CLI local
+#   PBIDOC_DEBUG=1       mostra a saída completa do assistente
+
+set -uo pipefail
+
+[ "${PBIDOC_SKIP:-}" = "1" ] && exit 0
+
+AMARELO=$'\033[33m'; VERDE=$'\033[32m'; VERMELHO=$'\033[31m'; CINZA=$'\033[90m'; RESET=$'\033[0m'
+if [ ! -t 2 ]; then AMARELO=""; VERDE=""; VERMELHO=""; CINZA=""; RESET=""; fi
+
+log()   { printf '%spbidoc%s %s\n' "$CINZA" "$RESET" "$*" >&2; }
+ok()    { printf '%spbidoc%s %s\n' "$VERDE" "$RESET" "$*" >&2; }
+aviso() { printf '%spbidoc: %s%s\n' "$AMARELO" "$*" "$RESET" >&2; }
+erro()  { printf '%spbidoc: %s%s\n' "$VERMELHO" "$*" "$RESET" >&2; }
+desiste() { aviso "$* — commit liberado sem atualizar a documentação."; exit 0; }
+
+REPO="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+cd "$REPO" || exit 0
+
+PY="$(command -v python3 || command -v python)"
+[ -z "$PY" ] && desiste "python3 não encontrado no PATH"
+
+# --------------------------------------------------------- 0. guardrails (bloqueia)
+if [ -f "tools/guardrails/check.py" ]; then
+  if ! "$PY" tools/guardrails/check.py --staged; then
+    erro "commit BLOQUEADO pelos guardrails (veja acima). Isto não é contornável"
+    erro "pelo pre-commit — remova o(s) arquivo(s) do stage, ou use PBIDOC_SKIP=1"
+    erro "apenas se tiver certeza do que está fazendo."
+    exit 1
+  fi
+fi
+
+# ---------------------------------------------------------------- 1. vale a pena?
+ALTERADOS="$(git diff --cached --name-only --diff-filter=ACMRD -- \
+    '*.tmdl' '*.pbip' '*.pbir' '*.pbism' '*.platform' \
+    '*.Report/definition/*' '*.SemanticModel/definition/*' 2>/dev/null)"
+[ -z "$ALTERADOS" ] && exit 0
+
+PBIDOC="tools/pbidoc/pbidoc.py"
+[ -f "$PBIDOC" ] || desiste "tools/pbidoc/pbidoc.py não encontrado"
+
+# --------------------------------------------------- projetos afetados pelo commit
+PROJETOS_DIR="$("$PY" - <<'PYEOF' 2>/dev/null
+import json, os
+cfg = {}
+if os.path.isfile(".pbidoc.json"):
+    try:
+        cfg = json.load(open(".pbidoc.json", encoding="utf-8")) or {}
+    except Exception:
+        cfg = {}
+print(cfg.get("projetos_dir") or "projetos")
+PYEOF
+)"
+PROJETOS_DIR="${PROJETOS_DIR:-projetos}"
+
+# NOTA: não use aqui `"$PY" - <<PYEOF` junto de um pipe de dados — o heredoc
+# ocupa o stdin do processo para o PRÓPRIO texto do script (é dali que
+# `python3 -` lê o que vai executar), então `sys.stdin` dentro do script não
+# recebe mais nada do pipe. O script vai por `-c` (argumento), e o pipe fica
+# livre para alimentar `sys.stdin` com a lista de arquivos.
+PROJETOS_PY='
+import sys
+projetos_dir = sys.argv[1].rstrip("/")
+nomes = set()
+for linha in sys.stdin:
+    linha = linha.strip()
+    if not linha:
+        continue
+    partes = linha.split("/")
+    if partes[0] == projetos_dir and len(partes) > 1:
+        nomes.add(partes[1])
+    elif projetos_dir not in partes[:1]:
+        # repositório de projeto único: qualquer mudança conta para o projeto único
+        nomes.add("")
+for n in sorted(nomes):
+    print(n)
+'
+PROJETOS="$(printf '%s\n' "$ALTERADOS" | "$PY" -c "$PROJETOS_PY" "$PROJETOS_DIR" 2>/dev/null)"
+
+if [ -z "$PROJETOS" ]; then
+  desiste "não foi possível determinar os projetos afetados"
+fi
+
+# --------------------------------------------------------------- ler configuração
+leia_config() {
+  # $1 = chave; $2 = nome do projeto (pode ser vazio no modo projeto único)
+  "$PY" - "$1" "$2" <<'PYEOF' 2>/dev/null
+import json, os, sys
+chave, projeto = sys.argv[1], sys.argv[2]
+cfg = {}
+if os.path.isfile(".pbidoc.json"):
+    try:
+        cfg = json.load(open(".pbidoc.json", encoding="utf-8")) or {}
+    except Exception:
+        cfg = {}
+padrao = {"modelo": "sonnet", "timeout": 900, "limite_itens_precommit": 120,
+          "formatos": ["md", "docx"]}
+valor = cfg.get(chave)
+if projeto and isinstance(cfg.get("projetos"), dict):
+    valor = (cfg["projetos"].get(projeto) or {}).get(chave, valor)
+if valor is None:
+    valor = padrao.get(chave, "")
+print(",".join(valor) if isinstance(valor, list) else valor)
+PYEOF
+}
+
+FALHAS=0
+for PROJETO in $PROJETOS; do
+  MODELO="${PBIDOC_MODEL:-$(leia_config modelo "$PROJETO")}"; MODELO="${MODELO:-sonnet}"
+  TIMEOUT="${PBIDOC_TIMEOUT:-$(leia_config timeout "$PROJETO")}"; TIMEOUT="${TIMEOUT:-900}"
+  LIMITE="$(leia_config limite_itens_precommit "$PROJETO")"; LIMITE="${LIMITE:-120}"
+  FORMATOS="$(leia_config formatos "$PROJETO")"; FORMATOS="${FORMATOS:-md,docx}"
+
+  RENDER_FLAGS=""
+  case ",$FORMATOS," in *,md,*)   RENDER_FLAGS="$RENDER_FLAGS --md";;   esac
+  case ",$FORMATOS," in *,docx,*) RENDER_FLAGS="$RENDER_FLAGS --docx";; esac
+  [ -z "$RENDER_FLAGS" ] && RENDER_FLAGS="--md"
+
+  case ",$FORMATOS," in
+    *,md,*) SKILL="pbi-doc-md";;
+    *)      SKILL="pbi-doc-docx";;
+  esac
+
+  if [ -n "$PROJETO" ]; then
+    FLAG_PROJ=(--projeto "$PROJETO")
+    RES_NOME="$PROJETO"
+  else
+    FLAG_PROJ=()
+    RES_NOME="(projeto único)"
+  fi
+
+  # ---------------------------------------------------- 2. extrair e comparar (0 tokens)
+  "$PY" "$PBIDOC" "${FLAG_PROJ[@]}" extract >/dev/null 2>&1 || {
+    aviso "[$RES_NOME] falha ao extrair o modelo TMDL"; FALHAS=1; continue; }
+  "$PY" "$PBIDOC" "${FLAG_PROJ[@]}" diff --limite "$LIMITE" >/dev/null 2>&1 || {
+    aviso "[$RES_NOME] falha ao comparar o modelo"; FALHAS=1; continue; }
+
+  CACHE_NOME="${PROJETO:-$("$PY" - <<'PYEOF'
+import glob, os
+sm = sorted(glob.glob("*.SemanticModel"))
+print(os.path.basename(sm[0])[:-len(".SemanticModel")] if sm else "")
+PYEOF
+)}"
+
+  PENDENTES="$("$PY" -c "
+import json
+try:
+    print(json.load(open('.pbidoc-cache/$CACHE_NOME/changes.json', encoding='utf-8'))['resumo']['total_a_escrever'])
+except Exception:
+    print(-1)
+" 2>/dev/null)"
+  if [ "$PENDENTES" = "-1" ]; then
+    aviso "[$RES_NOME] não foi possível ler changes.json"; FALHAS=1; continue
+  fi
+
+  renderiza_e_indexa() {
+    # shellcheck disable=SC2086
+    "$PY" "$PBIDOC" "${FLAG_PROJ[@]}" render $RENDER_FLAGS >/dev/null 2>&1 || {
+      aviso "[$RES_NOME] falha ao renderizar a documentação"; return 1; }
+    DOCS="$("$PY" -c "
+import json, os
+cfg = json.load(open('.pbidoc.json', encoding='utf-8')) if os.path.isfile('.pbidoc.json') else {}
+print(os.path.join(cfg.get('docs_dir') or 'docs', '$CACHE_NOME'))
+" 2>/dev/null)"
+    [ -n "$DOCS" ] && [ -d "$DOCS" ] && git add -- "$DOCS" 2>/dev/null
+    DOCS_INDICE="$("$PY" -c "
+import json, os
+cfg = json.load(open('.pbidoc.json', encoding='utf-8')) if os.path.isfile('.pbidoc.json') else {}
+print(cfg.get('docs_dir') or 'docs')
+" 2>/dev/null)"
+    [ -n "$DOCS_INDICE" ] && [ -f "$DOCS_INDICE/README.md" ] && git add -- "$DOCS_INDICE/README.md" 2>/dev/null
+    return 0
+  }
+
+  if [ "$PENDENTES" -eq 0 ]; then
+    renderiza_e_indexa && ok "[$RES_NOME] documentação re-renderizada (nenhuma descrição nova)"
+    continue
+  fi
+
+  # ------------------------------------------------------------ 3. escrever a prosa
+  if [ "${PBIDOC_BACKEND:-local}" = "api" ]; then
+    [ -z "${ANTHROPIC_API_KEY:-}" ] && { aviso "[$RES_NOME] PBIDOC_BACKEND=api exige ANTHROPIC_API_KEY"; FALHAS=1; continue; }
+    [ -f "tools/pbidoc/describe_api.py" ] || {
+      aviso "[$RES_NOME] backend de API selecionado mas tools/pbidoc/describe_api.py não existe"
+      FALHAS=1; continue; }
+    log "[$RES_NOME] descrevendo $PENDENTES objetos via API ($MODELO)…"
+    "$PY" tools/pbidoc/describe_api.py --projeto "$CACHE_NOME" --model "$MODELO" || \
+      aviso "[$RES_NOME] a chamada de API falhou"
+  else
+    ASSISTENTE="$(command -v claude || command -v opencode || true)"
+    [ -z "$ASSISTENTE" ] && [ -x "$HOME/.local/bin/claude" ] && ASSISTENTE="$HOME/.local/bin/claude"
+    if [ -z "$ASSISTENTE" ]; then
+      aviso "[$RES_NOME] nenhuma CLI de assistente encontrada (claude/opencode) — PATH do hook é reduzido"
+      FALHAS=1; continue
+    fi
+
+    log "[$RES_NOME] descrevendo $PENDENTES objetos com $(basename "$ASSISTENTE") ($MODELO)…"
+    PROMPT="Acione a skill $SKILL --precommit para o projeto $RES_NOME.
+
+Execução automática de pre-commit. As mudanças já estão em
+.pbidoc-cache/$CACHE_NOME/changes.json. Siga o procedimento da skill sem
+fazer perguntas e sem explorar o repositório além desse arquivo."
+
+    SAIDA="$(mktemp)"
+    case "$(basename "$ASSISTENTE")" in
+      claude)
+        timeout "$TIMEOUT" "$ASSISTENTE" -p "$PROMPT" \
+            --model "$MODELO" \
+            --permission-mode acceptEdits \
+            --allowedTools Read Write Edit Glob Grep "Bash(python3 tools/pbidoc/pbidoc.py:*)" \
+            --disallowedTools WebFetch WebSearch \
+            --output-format text >"$SAIDA" 2>&1
+        ;;
+      opencode)
+        timeout "$TIMEOUT" "$ASSISTENTE" run "$PROMPT" >"$SAIDA" 2>&1
+        ;;
+    esac
+    CODIGO=$?
+    if [ "${PBIDOC_DEBUG:-}" = "1" ]; then cat "$SAIDA" >&2; fi
+    if [ $CODIGO -eq 124 ]; then
+      aviso "[$RES_NOME] excedeu ${TIMEOUT}s; seguindo com o que já foi escrito"
+    elif [ $CODIGO -ne 0 ]; then
+      aviso "[$RES_NOME] o assistente retornou erro $CODIGO (use PBIDOC_DEBUG=1 para ver a saída)"
+      tail -3 "$SAIDA" >&2
+    fi
+    rm -f "$SAIDA"
+  fi
+
+  # lotes que porventura não tenham sido mesclados pela skill
+  shopt -s nullglob
+  LOTES=(".pbidoc-cache/$CACHE_NOME"/patch-*.json)
+  if [ ${#LOTES[@]} -gt 0 ]; then
+    "$PY" "$PBIDOC" merge "${LOTES[@]}" --limpar >/dev/null 2>&1 || \
+      aviso "[$RES_NOME] falha ao mesclar os lotes de descrição"
+  fi
+  shopt -u nullglob
+
+  renderiza_e_indexa || continue
+
+  RESTANTES="$("$PY" "$PBIDOC" "${FLAG_PROJ[@]}" diff >/dev/null 2>&1; "$PY" -c "
+import json
+try:
+    print(json.load(open('.pbidoc-cache/$CACHE_NOME/changes.json', encoding='utf-8'))['resumo']['total_a_escrever'])
+except Exception:
+    print('?')
+" 2>/dev/null)"
+  ok "[$RES_NOME] documentação atualizada e adicionada ao commit (pendentes: ${RESTANTES:-?})"
+done
+
+exit 0

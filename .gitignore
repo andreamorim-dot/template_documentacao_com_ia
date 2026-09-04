@@ -1,0 +1,46 @@
+# pbidoc — cache de trabalho, não versionar
+.pbidoc-cache/
+
+# template .docx — gerado localmente por make_template.py a partir do documento
+# de referência de cada equipe; nunca compartilhar a identidade visual de um
+# cliente via este repositório
+tools/pbidoc/assets/template.docx
+
+# segredos — nunca versionar (o guardrail também bloqueia a LEITURA destes)
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+!.env.dist
+!.env.tmpl
+
+# dados reais de projetos Power BI — nunca versionar
+projetos/**/.pbi/
+projetos/**/*.pbix
+projetos/**/*.pbit
+projetos/**/*.abf
+projetos/**/*.csv
+projetos/**/*.tsv
+projetos/**/*.xlsx
+projetos/**/*.xls
+projetos/**/*.xlsb
+projetos/**/*.parquet
+projetos/**/*.avro
+projetos/**/*.orc
+projetos/**/*.accdb
+projetos/**/*.mdb
+projetos/**/*.sqlite
+projetos/**/*.sqlite3
+projetos/**/*.db
+
+# Power BI Desktop — configurações e cache locais
+**/.pbi/localSettings.json
+**/.pbi/cache.abf
+
+__pycache__/
+*.pyc
+
+# Observação: dentro de docs/<projeto>/, `_descriptions.json`, `_model.json` e
+# `_meta.json` são versionados DE PROPÓSITO — é o que permite a comparação
+# incremental por hash entre commits. Não os adicione aqui.
