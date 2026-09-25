@@ -6,6 +6,8 @@
 #   0. guardrails ...................................... BLOQUEIA o commit (exit 1)
 #      se algum arquivo de dado real/segredo estiver em stage — única parte deste
 #      hook que não é "aberta".
+#   0b. skills ......................................... espelha .claude/skills em
+#      .agents/skills (Antigravity) e adiciona ao commit (só avisa se falhar).
 #   1. nenhum arquivo de PBIP em stage ................. sai em ~10 ms, custo zero
 #   2. arquivos mudaram mas nenhuma descrição nova ...... só re-renderiza, custo zero
 #   3. há objetos novos/alterados ........................ chama o assistente local
@@ -48,6 +50,16 @@ if [ -f "tools/guardrails/check.py" ]; then
     erro "pelo pre-commit — remova o(s) arquivo(s) do stage, ou use PBIDOC_SKIP=1"
     erro "apenas se tiver certeza do que está fazendo."
     exit 1
+  fi
+fi
+
+# ------------------------------------------- skills para o Antigravity (.agents/skills)
+# `.claude/skills/` é a fonte; `.agents/skills/` é cópia gerada. Falha aqui só avisa.
+if [ -f "tools/sync_skills.py" ]; then
+  if "$PY" tools/sync_skills.py >/dev/null 2>&1; then
+    [ -d ".agents/skills" ] && git add -- .agents/skills 2>/dev/null
+  else
+    aviso "não foi possível sincronizar .agents/skills (rode: python3 tools/sync_skills.py)"
   fi
 fi
 
@@ -126,20 +138,26 @@ PYEOF
 }
 
 FALHAS=0
-for PROJETO in $PROJETOS; do
+# Um projeto por linha (o nome pode ter espaços). O fd 3 evita que comandos dentro do
+# laço consumam a lista pelo stdin.
+while IFS= read -r PROJETO <&3; do
   MODELO="${PBIDOC_MODEL:-$(leia_config modelo "$PROJETO")}"; MODELO="${MODELO:-sonnet}"
   TIMEOUT="${PBIDOC_TIMEOUT:-$(leia_config timeout "$PROJETO")}"; TIMEOUT="${TIMEOUT:-900}"
   LIMITE="$(leia_config limite_itens_precommit "$PROJETO")"; LIMITE="${LIMITE:-120}"
   FORMATOS="$(leia_config formatos "$PROJETO")"; FORMATOS="${FORMATOS:-md,docx}"
 
   RENDER_FLAGS=""
-  case ",$FORMATOS," in *,md,*)   RENDER_FLAGS="$RENDER_FLAGS --md";;   esac
-  case ",$FORMATOS," in *,docx,*) RENDER_FLAGS="$RENDER_FLAGS --docx";; esac
+  case ",$FORMATOS," in *,md,*)      RENDER_FLAGS="$RENDER_FLAGS --md";;      esac
+  case ",$FORMATOS," in *,docx,*)    RENDER_FLAGS="$RENDER_FLAGS --docx";;    esac
+  case ",$FORMATOS," in *,negocio,*) RENDER_FLAGS="$RENDER_FLAGS --negocio";; esac
   [ -z "$RENDER_FLAGS" ] && RENDER_FLAGS="--md"
 
+  # O escopo `negocio` é um superconjunto do `tecnico` (inclui as páginas do relatório),
+  # então basta a skill de negócio quando ele está em `formatos`.
   case ",$FORMATOS," in
-    *,md,*) SKILL="pbi-doc-md";;
-    *)      SKILL="pbi-doc-docx";;
+    *,negocio,*) SKILL="pbi-doc-negocio"; ESCOPO="negocio";;
+    *,md,*)      SKILL="pbi-doc-md";      ESCOPO="tecnico";;
+    *)           SKILL="pbi-doc-docx";    ESCOPO="tecnico";;
   esac
 
   if [ -n "$PROJETO" ]; then
@@ -153,7 +171,7 @@ for PROJETO in $PROJETOS; do
   # ---------------------------------------------------- 2. extrair e comparar (0 tokens)
   "$PY" "$PBIDOC" "${FLAG_PROJ[@]}" extract >/dev/null 2>&1 || {
     aviso "[$RES_NOME] falha ao extrair o modelo TMDL"; FALHAS=1; continue; }
-  "$PY" "$PBIDOC" "${FLAG_PROJ[@]}" diff --limite "$LIMITE" >/dev/null 2>&1 || {
+  "$PY" "$PBIDOC" "${FLAG_PROJ[@]}" diff --escopo "$ESCOPO" --limite "$LIMITE" >/dev/null 2>&1 || {
     aviso "[$RES_NOME] falha ao comparar o modelo"; FALHAS=1; continue; }
 
   CACHE_NOME="${PROJETO:-$("$PY" - <<'PYEOF'
@@ -218,9 +236,11 @@ print(cfg.get('docs_dir') or 'docs')
     log "[$RES_NOME] descrevendo $PENDENTES objetos com $(basename "$ASSISTENTE") ($MODELO)…"
     PROMPT="Acione a skill $SKILL --precommit para o projeto $RES_NOME.
 
-Execução automática de pre-commit. As mudanças já estão em
-.pbidoc-cache/$CACHE_NOME/changes.json. Siga o procedimento da skill sem
-fazer perguntas e sem explorar o repositório além desse arquivo."
+Execução automática de pre-commit. O hook já rodou extract e diff (escopo
+$ESCOPO): não os rode de novo. As mudanças estão em
+.pbidoc-cache/$CACHE_NOME/changes.json. Siga o procedimento da skill a partir da
+escrita das descrições, sem fazer perguntas e sem explorar o repositório além
+desse arquivo."
 
     SAIDA="$(mktemp)"
     case "$(basename "$ASSISTENTE")" in
@@ -230,10 +250,10 @@ fazer perguntas e sem explorar o repositório além desse arquivo."
             --permission-mode acceptEdits \
             --allowedTools Read Write Edit Glob Grep "Bash(python3 tools/pbidoc/pbidoc.py:*)" \
             --disallowedTools WebFetch WebSearch \
-            --output-format text >"$SAIDA" 2>&1
+            --output-format text >"$SAIDA" 2>&1 </dev/null
         ;;
       opencode)
-        timeout "$TIMEOUT" "$ASSISTENTE" run "$PROMPT" >"$SAIDA" 2>&1
+        timeout "$TIMEOUT" "$ASSISTENTE" run "$PROMPT" >"$SAIDA" 2>&1 </dev/null
         ;;
     esac
     CODIGO=$?
@@ -251,14 +271,14 @@ fazer perguntas e sem explorar o repositório além desse arquivo."
   shopt -s nullglob
   LOTES=(".pbidoc-cache/$CACHE_NOME"/patch-*.json)
   if [ ${#LOTES[@]} -gt 0 ]; then
-    "$PY" "$PBIDOC" merge "${LOTES[@]}" --limpar >/dev/null 2>&1 || \
+    "$PY" "$PBIDOC" merge "${LOTES[@]}" --limpar --escopo "$ESCOPO" >/dev/null 2>&1 || \
       aviso "[$RES_NOME] falha ao mesclar os lotes de descrição"
   fi
   shopt -u nullglob
 
   renderiza_e_indexa || continue
 
-  RESTANTES="$("$PY" "$PBIDOC" "${FLAG_PROJ[@]}" diff >/dev/null 2>&1; "$PY" -c "
+  RESTANTES="$("$PY" "$PBIDOC" "${FLAG_PROJ[@]}" diff --escopo "$ESCOPO" >/dev/null 2>&1; "$PY" -c "
 import json
 try:
     print(json.load(open('.pbidoc-cache/$CACHE_NOME/changes.json', encoding='utf-8'))['resumo']['total_a_escrever'])
@@ -266,6 +286,6 @@ except Exception:
     print('?')
 " 2>/dev/null)"
   ok "[$RES_NOME] documentação atualizada e adicionada ao commit (pendentes: ${RESTANTES:-?})"
-done
+done 3<<< "$PROJETOS"
 
 exit 0
