@@ -5,7 +5,9 @@
       "Bash(python3 tools/pbidoc/pbidoc.py:*)",
       "Bash(python3 tools/pbidoc/make_template.py:*)",
       "Bash(python3 tools/pbidoc/describe_api.py:*)",
-      "Bash(python3 tools/guardrails/check.py:*)"
+      "Bash(python3 tools/guardrails/check.py:*)",
+      "Bash(python3 tools/pbidoc/make_modelo.py:*)",
+      "Bash(python3 tools/sync_skills.py:*)"
     ],
     "deny": [
       "Read(**/.env)",
@@ -35,7 +37,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 tools/guardrails/check.py --hook-claude"
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/tools/guardrails/check.py\" --hook-claude"
           }
         ]
       }
