@@ -1,0 +1,16 @@
+{
+  "pbi-guardrails": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -c \"import os,sys,runpy,json;c=[p for p in ('tools/guardrails/check.py','../tools/guardrails/check.py') if os.path.isfile(p)];sys.argv=['check.py','--hook-antigravity'];runpy.run_path(c[0],run_name='__main__') if c else print(json.dumps({'decision':'allow'}))\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

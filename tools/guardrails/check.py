@@ -19,6 +19,11 @@ Modos:
                                      {"deny": bool, "reason": str} no stdout.
                                      Mesmo fail-open do modo acima.
 
+    check.py --hook-antigravity     lê um evento PreToolUse do Antigravity no stdin
+                                     (`{"toolCall": {"name", "args"}}`) e devolve
+                                     `{"decision": "deny"|"allow", "reason"}`. Mesmo
+                                     fail-open dos modos acima.
+
     check.py --path CAMINHO         testa um caminho isolado.
                                      exit 0 = permitido, exit 2 = bloqueado.
 
@@ -46,7 +51,14 @@ import policy  # noqa: E402
 # Chaves de tool_input que podem conter caminhos (Claude Code e a maioria dos
 # harnesses que seguem esse mesmo formato de tool call).
 PATH_KEYS = ("file_path", "path", "notebook_path", "filePath", "file", "paths",
-             "filename", "target_file", "old_path", "new_path")
+             "filename", "target_file", "old_path", "new_path",
+             # Antigravity: view_file, write_to_file/replace_file_content, grep_search,
+             # list_dir, find_by_name
+             "AbsolutePath", "TargetFile", "SearchPath", "DirectoryPath", "SearchDirectory")
+
+# ferramentas que executam um comando de shell: `Bash` (Claude Code), `bash` (OpenCode),
+# `run_command` (Antigravity, argumento `CommandLine`)
+SHELL_TOOLS = ("bash", "run_command")
 
 
 def _collect_paths(ti):
@@ -64,13 +76,14 @@ def _decisao_para(tool_name, tool_input):
     """Motivo do bloqueio (ou None) para uma tool call genérica.
 
     Nomes de tool variam por harness (Claude Code usa "Bash"/"Read"; o
-    OpenCode usa "bash"/"read" em minúsculas) — a comparação abaixo é
-    case-insensitive para cobrir os dois sem duplicar esta função.
+    OpenCode usa "bash"/"read" em minúsculas; o Antigravity usa "run_command"/
+    "view_file") — a comparação abaixo é case-insensitive e cobre todos sem
+    duplicar esta função.
     """
     if not isinstance(tool_input, dict):
         return None
-    if (tool_name or "").lower() == "bash":
-        cmd = tool_input.get("command", "")
+    if (tool_name or "").lower() in SHELL_TOOLS:
+        cmd = tool_input.get("command") or tool_input.get("CommandLine") or ""
         if isinstance(cmd, str):
             return policy.motivo_bloqueio_bash(cmd)
         return None
@@ -117,6 +130,24 @@ def _modo_hook_json():
         raise
     except Exception:
         print(json.dumps({"deny": False}))  # fail-open
+    sys.exit(0)
+
+
+def _modo_hook_antigravity():
+    """PreToolUse do Antigravity: `{toolCall:{name,args}}` -> `{decision, reason}`."""
+    try:
+        data = json.loads(sys.stdin.read())
+        call = data.get("toolCall") or {}
+        motivo = _decisao_para(call.get("name", "") or "", call.get("args"))
+        if motivo:
+            print(json.dumps({"decision": "deny",
+                              "reason": "Bloqueado pelos guardrails: %s." % motivo}))
+        else:
+            print(json.dumps({"decision": "allow"}))
+    except SystemExit:
+        raise
+    except Exception:
+        print(json.dumps({"decision": "allow"}))  # fail-open
     sys.exit(0)
 
 
@@ -171,6 +202,8 @@ def main(argv):
     modo = argv[0]
     if modo == "--hook-claude":
         _modo_hook_claude()
+    elif modo == "--hook-antigravity":
+        _modo_hook_antigravity()
     elif modo == "--hook-json":
         _modo_hook_json()
     elif modo == "--path" and len(argv) > 1:
