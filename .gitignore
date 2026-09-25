@@ -1,10 +1,9 @@
 # pbidoc — cache de trabalho, não versionar
 .pbidoc-cache/
 
-# template .docx — gerado localmente por make_template.py a partir do documento
-# de referência de cada equipe; nunca compartilhar a identidade visual de um
-# cliente via este repositório
-tools/pbidoc/assets/template.docx
+# templates .docx (técnico e negócio) — gerados localmente por make_template.py a
+# partir dos documentos-modelo de docs/templates/ (ou de um da própria equipe)
+tools/pbidoc/assets/template*.docx
 
 # segredos — nunca versionar (o guardrail também bloqueia a LEITURA destes)
 .env

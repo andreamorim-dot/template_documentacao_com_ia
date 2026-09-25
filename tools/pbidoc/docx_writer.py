@@ -5,9 +5,9 @@ nenhum cliente) usada quando um projeto não define a sua própria. Qualquer equ
 pode sobrescrevê-las por `.pbidoc.json` (globalmente ou por projeto) numa seção
 `estilo_docx`, sem tocar neste arquivo — veja `aplicar_estilo()` abaixo, chamada uma
 vez por `render_docx.render()`. As demais propriedades visuais (tema, cabeçalho com
-logotipo, rodapé, fontes embutidas) vêm de `tools/pbidoc/assets/template.docx`,
-gerado localmente a partir do documento de referência de cada equipe — veja
-`make_template.py`.
+logotipo, rodapé, fontes embutidas) vêm de `tools/pbidoc/assets/template-tecnico.docx`
+e `template-negocio.docx`, gerados localmente a partir dos documentos-modelo de
+cada equipe (`docs/templates/`) — veja `make_template.py`.
 
 Padrão de fábrica:
 
@@ -39,20 +39,32 @@ COR_BRANCO = "ffffff"
 # largura útil da página do template: 11909 - 1440 - 1440
 LARGURA_UTIL = 9029
 
+# Documento de negócio: o modelo traz Lato embutida e um verde de marca; são o padrão
+# do modelo, e também configuráveis (`fonte_neg`, `fonte_neg_leve`, `cor_neg_*`).
+FONTE_NEG = "Lato"
+FONTE_NEG_LEVE = "Lato Light"
+COR_NEG_TITULO = "38761d"       # Heading1 do modelo de negócio
+COR_NEG_DESTAQUE = "76b900"     # Heading2, título da capa e subtítulos em parágrafo
+FONTE_TOC = "Arial"
+PREENCHER = "PREENCHER"
+
 _CHAVES_ESTILO = ("fonte", "fonte_leve", "fonte_mono", "cor_titulo", "cor_subtitulo",
                    "cor_texto", "cor_suave", "cor_h3", "cor_codigo_fundo", "cor_borda",
-                   "cor_branco")
+                   "cor_branco", "fonte_neg", "fonte_neg_leve", "cor_neg_titulo",
+                   "cor_neg_destaque", "fonte_toc")
 
 
 def aplicar_estilo(estilo):
     """Sobrescreve a paleta/fontes a partir de `estilo_docx` do `.pbidoc.json`
     (mesclado global -> projeto, como o resto da configuração). Chaves aceitas:
     `fonte`, `fonte_leve`, `fonte_mono`, `cor_titulo`, `cor_subtitulo`, `cor_texto`,
-    `cor_suave`, `cor_h3`, `cor_codigo_fundo`, `cor_borda`, `cor_branco`. Cores em
-    hex sem `#` (ex.: `"2563eb"`). Chamar antes de montar o `Body`."""
+    `cor_suave`, `cor_h3`, `cor_codigo_fundo`, `cor_borda`, `cor_branco` e, para o
+    documento de negócio, `fonte_neg`, `fonte_neg_leve`, `fonte_toc`, `cor_neg_titulo`,
+    `cor_neg_destaque`. Cores em hex sem `#` (ex.: `"2563eb"`). Chamar antes de montar o `Body`."""
     global FONTE, FONTE_LEVE, FONTE_MONO
     global COR_TITULO, COR_SUBTITULO, COR_TEXTO, COR_SUAVE, COR_H3
     global COR_CODIGO_FUNDO, COR_BORDA, COR_BRANCO
+    global FONTE_NEG, FONTE_NEG_LEVE, COR_NEG_TITULO, COR_NEG_DESTAQUE, FONTE_TOC
     if not estilo:
         return
     FONTE = estilo.get("fonte", FONTE)
@@ -66,6 +78,11 @@ def aplicar_estilo(estilo):
     COR_CODIGO_FUNDO = estilo.get("cor_codigo_fundo", COR_CODIGO_FUNDO)
     COR_BORDA = estilo.get("cor_borda", COR_BORDA)
     COR_BRANCO = estilo.get("cor_branco", COR_BRANCO)
+    FONTE_NEG = estilo.get("fonte_neg", FONTE_NEG)
+    FONTE_NEG_LEVE = estilo.get("fonte_neg_leve", FONTE_NEG_LEVE)
+    COR_NEG_TITULO = estilo.get("cor_neg_titulo", COR_NEG_TITULO)
+    COR_NEG_DESTAQUE = estilo.get("cor_neg_destaque", COR_NEG_DESTAQUE)
+    FONTE_TOC = estilo.get("fonte_toc", FONTE_TOC)
 
 
 def esc(texto):
@@ -89,10 +106,9 @@ def _fontes(nome):
     return ('<w:rFonts w:ascii="{0}" w:cs="{0}" w:eastAsia="{0}" w:hAnsi="{0}"/>'.format(nome))
 
 
-def rpr(fonte=None, sz=24, cor=None, negrito=False, italico=False, mono=False):
-    # `fonte`/`FONTE_MONO` são lidos aqui (não como default de parâmetro) para que
-    # `aplicar_estilo()` — que reatribui os globais do módulo — valha em toda chamada,
-    # mesmo as que já estavam "prontas" antes da configuração ser aplicada.
+def rpr(fonte=None, sz=24, cor=None, negrito=False, italico=False, mono=False,
+        realce=None):
+    # defaults lidos aqui (não no `def`) para `aplicar_estilo()` valer em toda chamada
     fonte = fonte if fonte is not None else FONTE_LEVE
     partes = [_fontes(FONTE_MONO if mono else fonte)]
     if negrito:
@@ -102,6 +118,8 @@ def rpr(fonte=None, sz=24, cor=None, negrito=False, italico=False, mono=False):
     if cor:
         partes.append('<w:color w:val="%s"/>' % cor)
     partes.append('<w:sz w:val="%d"/><w:szCs w:val="%d"/>' % (sz, sz))
+    if realce:
+        partes.append('<w:highlight w:val="%s"/>' % realce)
     partes.append('<w:rtl w:val="0"/>')
     return "<w:rPr>%s</w:rPr>" % "".join(partes)
 
@@ -119,7 +137,10 @@ def run(texto, **kw):
 
 
 class Body:
-    """Acumula o XML do corpo do documento."""
+    """Acumula o XML do corpo do documento (vocabulário do glossário técnico)."""
+
+    def cor_cabecalho_tabela(self):
+        return COR_TITULO
 
     def __init__(self):
         self._partes = []
@@ -262,7 +283,7 @@ class Body:
         xml.append('<w:tr><w:trPr><w:cantSplit w:val="1"/><w:tblHeader/></w:trPr>')
         for i, titulo in enumerate(cabecalho):
             xml.append(self._celula(titulo, larguras[i], sz=sz, negrito=True,
-                                    cor=COR_BRANCO, fundo=COR_TITULO, fonte=FONTE))
+                                    cor=COR_BRANCO, fundo=self.cor_cabecalho_tabela(), fonte=FONTE))
         xml.append("</w:tr>")
 
         for j, linha in enumerate(linhas):
@@ -294,24 +315,194 @@ class Body:
         return "".join(self._partes)
 
 
+# ------------------------------------------------------------ documento de negócio
+
+
+class BodyNegocio(Body):
+    """Vocabulário do modelo "Documentação de Negócio" (fonte/cores: FONTE_NEG*, COR_NEG_*).
+
+    Os títulos usam só `pStyle` (a formatação vem do `styles.xml` do template);
+    o corpo é Lato 11 pt justificado e as listas usam os marcadores do
+    `numbering.xml` do próprio modelo (numId 1, 2 e 3).
+    """
+
+    def cor_cabecalho_tabela(self):
+        return COR_NEG_TITULO
+
+    def __init__(self):
+        super().__init__()
+        self._sumario = []
+
+    def _r(self, texto, negrito=False, cor=None, sz=None, fonte=None, realce=None,
+           italico=False, mono=False):
+        fonte = fonte if fonte is not None else FONTE_NEG
+        partes = [_fontes(FONTE_MONO if mono else fonte)]
+        if negrito:
+            partes.append('<w:b w:val="1"/><w:bCs w:val="1"/>')
+        if italico:
+            partes.append('<w:i w:val="1"/><w:iCs w:val="1"/>')
+        if cor:
+            partes.append('<w:color w:val="%s"/>' % cor)
+        if sz:
+            partes.append('<w:sz w:val="%d"/><w:szCs w:val="%d"/>' % (sz, sz))
+        if realce:
+            partes.append('<w:highlight w:val="%s"/>' % realce)
+        partes.append('<w:rtl w:val="0"/>')
+        corpo = []
+        for i, linha in enumerate(str(texto or "").split("\n")):
+            if i:
+                corpo.append("<w:br/>")
+            corpo.append('<w:t xml:space="preserve">%s</w:t>' % esc(linha))
+        return "<w:r><w:rPr>%s</w:rPr>%s</w:r>" % ("".join(partes), "".join(corpo))
+
+    def pendente_run(self, oque, fonte=None, sz=None):
+        """Marcador pesquisável para o que não pode ser extraído do PBIP."""
+        fonte = fonte if fonte is not None else FONTE_NEG
+        return self._r("[%s: %s]" % (PREENCHER, oque), negrito=True, realce="yellow",
+                       fonte=fonte, sz=sz)
+
+    def _conteudo(self, partes, fonte=None, sz=None, negrito=False):
+        """`partes`: texto, ou lista de str / ("pendente", oque) / ("negrito", texto)."""
+        fonte = fonte if fonte is not None else FONTE_NEG
+        if isinstance(partes, tuple) and partes and partes[0] in ("pendente", "negrito", "mono"):
+            partes = [partes]
+        elif not isinstance(partes, (list, tuple)):
+            partes = [partes]
+        xml = []
+        for p in partes:
+            if isinstance(p, tuple) and p[0] == "pendente":
+                xml.append(self.pendente_run(p[1], fonte=fonte, sz=sz))
+            elif isinstance(p, tuple) and p[0] == "negrito":
+                xml.append(self._r(p[1], negrito=True, fonte=fonte, sz=sz))
+            elif isinstance(p, tuple) and p[0] == "mono":
+                xml.append(self._r(p[1], mono=True, sz=sz or 20))
+            else:
+                xml.append(self._r(p, negrito=negrito, fonte=fonte, sz=sz))
+        return "".join(xml)
+
+    # ------------------------------------------------------------------ capa
+    def titulo_capa(self, texto):
+        self._p('<w:pPr><w:rPr/></w:pPr>', "")
+        self._p('<w:pPr><w:rPr/></w:pPr>',
+                self._r(texto, negrito=True, cor=COR_NEG_DESTAQUE, sz=40))
+        self._p('<w:pPr><w:rPr/></w:pPr>', "")
+
+    def sumario(self):
+        """Reserva o lugar do sumário; preenchido em `xml()` com os títulos do documento."""
+        self._partes.append(None)
+
+    # ------------------------------------------------------------------ títulos
+    def heading(self, nivel, texto, chave=None, quebra_antes=False):
+        nivel = max(1, min(6, nivel))
+        chave = chave or "neg_h%d_%d_%s" % (nivel, len(self._sumario), texto)
+        ppr = ['<w:pPr><w:pStyle w:val="Heading%d"/>' % nivel]
+        if quebra_antes:
+            ppr.append('<w:pageBreakBefore w:val="1"/>')
+        ppr.append("<w:rPr/></w:pPr>")
+        marca = self._bookmark_xml(chave)
+        if marca:
+            self._sumario.append((nivel, texto, nome_bookmark(chave)))
+        self._p("".join(ppr),
+                marca + '<w:r><w:rPr><w:rtl w:val="0"/></w:rPr>'
+                        '<w:t xml:space="preserve">%s</w:t></w:r>' % esc(texto))
+
+    def destaque(self, texto):
+        """Subtítulo em parágrafo (ex.: "Ferramenta de BI"), Lato bold 12 pt verde."""
+        self._p('<w:pPr><w:spacing w:after="200" w:lineRule="auto"/><w:jc w:val="both"/>'
+                '<w:rPr/></w:pPr>',
+                self._r(texto, negrito=True, cor=COR_NEG_DESTAQUE, sz=24))
+
+    # ------------------------------------------------------------------ corpo
+    def paragrafo(self, partes="", negrito=False, italico=False, sz=None, **_):
+        if italico:
+            conteudo = self._r(partes, italico=True, sz=sz)
+        else:
+            conteudo = self._conteudo(partes, sz=sz, negrito=negrito)
+        self._p('<w:pPr><w:spacing w:after="200" w:lineRule="auto"/><w:jc w:val="both"/>'
+                '<w:rPr/></w:pPr>', conteudo)
+
+    def rotulo(self, rotulo, partes, sz=None):
+        """`**Rótulo**: texto` em Lato, como "Área de Negócio: …" no modelo."""
+        self._p('<w:pPr><w:spacing w:after="200" w:lineRule="auto"/><w:jc w:val="both"/>'
+                '<w:rPr/></w:pPr>',
+                self._r(rotulo, negrito=True, sz=sz) + self._r(": ", sz=sz)
+                + self._conteudo(partes, sz=sz))
+
+    def item(self, partes, nivel=0, num_id=3, rotulo=None, leve=False):
+        """Item de lista com marcador do `numbering.xml` do template."""
+        fonte = FONTE_NEG_LEVE if leve else FONTE_NEG
+        sz = 24 if leve else None
+        recuo = 720 + 720 * nivel
+        conteudo = ""
+        if rotulo:
+            conteudo += self._r(rotulo + ": ", negrito=True, fonte=fonte, sz=sz)
+        conteudo += self._conteudo(partes, fonte=fonte, sz=sz)
+        self._p('<w:pPr><w:numPr><w:ilvl w:val="%d"/><w:numId w:val="%d"/></w:numPr>'
+                '<w:spacing w:after="120" w:lineRule="auto"/>'
+                '<w:ind w:left="%d" w:hanging="360"/><w:jc w:val="both"/><w:rPr/></w:pPr>'
+                % (nivel, num_id, recuo), conteudo)
+
+    def vazio(self):
+        self._p('<w:pPr><w:rPr/></w:pPr>', "")
+
+    # ------------------------------------------------------------------ sumário
+    def _sumario_xml(self):
+        if not self._sumario:
+            return ""
+        estilo = ('<w:rFonts w:ascii="{f}" w:cs="{f}" w:eastAsia="{f}" w:hAnsi="{f}"/>{b}'
+                  '<w:color w:val="000000"/><w:sz w:val="22"/><w:szCs w:val="22"/>'
+                  '<w:u w:val="none"/>')
+        paras = []
+        n = len(self._sumario)
+        for i, (nivel, texto, alvo) in enumerate(self._sumario):
+            b = '<w:b w:val="1"/><w:bCs w:val="1"/>' if nivel == 1 else ""
+            rpr_ = estilo.format(f=FONTE_TOC, b=b)
+            ind = '<w:ind w:left="%d" w:firstLine="0"/>' % (360 * (nivel - 1)) if nivel > 1 else ""
+            inicio = ""
+            if i == 0:
+                inicio = ('<w:r><w:fldChar w:fldCharType="begin"/>'
+                          '<w:instrText xml:space="preserve"> TOC \\h \\u \\z \\n \\t '
+                          '&quot;Heading 1,1,Heading 2,2,Heading 3,3,&quot;</w:instrText>'
+                          '<w:fldChar w:fldCharType="separate"/></w:r>')
+            fim = '<w:r><w:fldChar w:fldCharType="end"/></w:r>' if i == n - 1 else ""
+            paras.append(
+                '<w:p><w:pPr><w:widowControl w:val="0"/>'
+                '<w:spacing w:before="60" w:line="240" w:lineRule="auto"/>%s</w:pPr>'
+                '%s<w:hyperlink w:anchor="%s"><w:r><w:rPr>%s<w:rtl w:val="0"/></w:rPr>'
+                '<w:t xml:space="preserve">%s</w:t></w:r></w:hyperlink>%s</w:p>'
+                % (ind, inicio, alvo, rpr_, esc(texto), fim))
+        return ('<w:sdt><w:sdtPr><w:docPartObj><w:docPartGallery w:val="Table of Contents"/>'
+                '<w:docPartUnique w:val="1"/></w:docPartObj></w:sdtPr><w:sdtContent>%s'
+                '</w:sdtContent></w:sdt>' % "".join(paras))
+
+    def xml(self):
+        toc = self._sumario_xml()
+        return "".join(toc if p is None else p for p in self._partes)
+
+
 class Mono(str):
     """Marca um valor de célula para ser renderizado em fonte monoespaçada."""
 
 
-def corpo_de(caminho):
-    """Devolve o corpo já gravado num .docx, ou None se o arquivo não existir."""
-    if not os.path.isfile(caminho):
-        return None
+def documento(template_path, body_xml):
+    """`word/document.xml` final: o do template com o marcador trocado pelo corpo."""
+    with zipfile.ZipFile(template_path) as z:
+        doc = z.read("word/document.xml").decode("utf-8")
+    if MARCADOR not in doc:
+        raise SystemExit("Template inválido: marcador %s ausente." % MARCADOR)
+    return doc.replace(MARCADOR, body_xml)
+
+
+def inalterado(template_path, destino, body_xml):
+    """True se `destino` já tem exatamente este conteúdo (evita blob novo no git)."""
+    if not os.path.isfile(destino):
+        return False
     try:
-        with zipfile.ZipFile(caminho) as z:
-            doc = z.read("word/document.xml").decode("utf-8")
+        with zipfile.ZipFile(destino) as z:
+            atual = z.read("word/document.xml").decode("utf-8")
     except (OSError, KeyError, zipfile.BadZipFile):
-        return None
-    inicio = doc.find("<w:body>")
-    fim = doc.find("<w:sectPr")
-    if inicio < 0 or fim < 0:
-        return None
-    return doc[inicio + len("<w:body>"):fim]
+        return False
+    return atual == documento(template_path, body_xml)
 
 
 def gravar(template_path, destino, body_xml):

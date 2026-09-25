@@ -1,4 +1,4 @@
-"""Renderiza a documentação completa num único .docx, no template visual de referência."""
+"""Renderiza o glossário de dados técnico num único .docx (modelo "Documentação Técnica")."""
 
 import os
 import re
@@ -8,11 +8,15 @@ import docx_writer as W
 import render_common as rc
 
 PENDENTE = "(descrição pendente)"
-NOME_TEMPLATE = "template.docx"
+NOME_TEMPLATE = "template-tecnico.docx"
+NOME_TEMPLATE_ANTIGO = "template.docx"      # nome usado antes de existirem dois modelos
 
 
 def _template_path():
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", NOME_TEMPLATE)
+    assets = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
+    atual = os.path.join(assets, NOME_TEMPLATE)
+    antigo = os.path.join(assets, NOME_TEMPLATE_ANTIGO)
+    return atual if os.path.isfile(atual) or not os.path.isfile(antigo) else antigo
 
 
 def _txt(valor):
@@ -312,7 +316,8 @@ def render(man, cfg, descriptions, destino, meta):
     if not os.path.isfile(template):
         raise SystemExit(
             "Template ausente: %s\nGere-o com:\n"
-            "  python3 tools/pbidoc/make_template.py <referencia.docx>" % template)
+            "  python3 tools/pbidoc/make_template.py "
+            "\"docs/templates/Modelo - Documentacao Tecnica.docx\" --modelo tecnico" % template)
 
     W.aplicar_estilo(cfg.get("estilo_docx"))
     prosa = rc.Prosa(descriptions)
@@ -333,7 +338,7 @@ def render(man, cfg, descriptions, destino, meta):
     caminho = os.path.join(destino, nome)
     corpo = b.xml()
     # reescrever um .docx idêntico geraria um blob novo no git a cada execução
-    if W.corpo_de(caminho) == corpo:
+    if W.inalterado(template, caminho, corpo):
         return None
     W.gravar(template, caminho, corpo)
     return nome
