@@ -19,9 +19,9 @@ def _load(path):
         return None
 
 
-def compute(manifest, descriptions, descrever_colunas=True, limite=None):
+def compute(manifest, descriptions, descrever_colunas=True, limite=None, escopo="tecnico"):
     objetos = (descriptions or {}).get("objetos", {}) or {}
-    itens = catalog.build(manifest, descrever_colunas=descrever_colunas)
+    itens = catalog.build(manifest, descrever_colunas=descrever_colunas, escopo=escopo)
 
     pendentes, chaves_atuais = [], set()
     contagem = {"novo": 0, "alterado": 0, "pendente": 0}
@@ -41,7 +41,10 @@ def compute(manifest, descriptions, descrever_colunas=True, limite=None):
         registro["estado"] = estado
         pendentes.append(registro)
 
-    removidos = sorted(k for k in objetos if k not in chaves_atuais)
+    # obsoleta é só a descrição que nenhum escopo usa: rodar o técnico não pode
+    # apagar a prosa das páginas escrita para o documento de negócio
+    validas = catalog.chaves_validas(manifest, descrever_colunas) | chaves_atuais
+    removidos = sorted(k for k in objetos if k not in validas)
 
     truncado = False
     if limite and len(pendentes) > limite:
@@ -52,6 +55,8 @@ def compute(manifest, descriptions, descrever_colunas=True, limite=None):
 
     return {
         "modo": "completo" if not objetos else "incremental",
+        "escopo": escopo,
+        "tipo_projeto": manifest["projeto"].get("tipo") or "completo",
         "projeto": manifest["projeto"]["nome"],
         "resumo": {
             "novos": contagem["novo"],

@@ -12,9 +12,13 @@ Subcomandos:
     projetos  lista os projetos do repositório e quantas descrições faltam
     extract   lê o TMDL/PBIR e grava o manifesto em `.pbidoc-cache/<projeto>/model.json`
     diff      compara com `_descriptions.json` e grava `.pbidoc-cache/<projeto>/changes.json`
-    render    gera a documentação (`--md`, `--docx`, ou ambos) + o índice em `docs/README.md`
+    render    gera a documentação (`--md`, `--docx` técnico, `--negocio`) + o índice em `docs/README.md`
     merge     mescla lotes de descrições em `_descriptions.json`
     status    resumo do estado atual da documentação
+
+`diff`, `merge` e `status` aceitam `--escopo tecnico|negocio`. O escopo `negocio` inclui
+tudo do técnico e acrescenta as páginas do relatório (e as colunas usadas nele).
+Sem a flag, vale `negocio` se o projeto tem `"negocio"` em `formatos`, senão `tecnico`.
 
 Todo subcomando aceita `--projeto NOME` (repetível, informado **antes** do
 subcomando: `pbidoc.py --projeto vendas --projeto rh extract`) para
@@ -27,7 +31,9 @@ resto é puramente mecânico.
 
 import argparse
 import os
+import subprocess
 import sys
+from urllib.parse import quote
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -108,7 +114,7 @@ class Contexto:
         return man
 
     def cfg(self):
-        return config.resolver_projeto(self.repo.cfg_bruta, self.nome)
+        return config.resolver_projeto(self.repo.cfg_bruta, self.nome, self.projeto_dir)
 
     def docs_dir(self):
         return config.docs_projeto(self.root, self.cfg())
@@ -120,6 +126,20 @@ class Contexto:
         return rc.carregar_json(self.descricoes_path(), catalog.vazio(self.nome))
 
 
+def _ignorado_pelo_git(root, path):
+    """True se o git ignora `path` (`.gitignore` ou `.git/info/exclude`).
+
+    Projetos ignorados são locais/temporários: não entram no índice `docs/README.md`
+    (versionado) nem são registrados no `.pbidoc.json` por `init`.
+    """
+    try:
+        r = subprocess.run(["git", "check-ignore", "-q", "--", path], cwd=root,
+                           capture_output=True)
+        return r.returncode == 0
+    except OSError:
+        return False
+
+
 def _rel(root, path):
     try:
         return os.path.relpath(path, root).replace(os.sep, "/")
@@ -129,6 +149,14 @@ def _rel(root, path):
 
 def _contextos(repo, args):
     return [Contexto(repo, nome, caminho) for nome, caminho in repo.selecionar(args.projeto)]
+
+
+def _escopo(cfg, args):
+    """Escopo do catálogo: pedido explícito, ou `negocio` se o projeto gera esse formato."""
+    pedido = getattr(args, "escopo", None)
+    if pedido:
+        return pedido
+    return "negocio" if "negocio" in (cfg.get("formatos") or []) else "tecnico"
 
 
 # ------------------------------------------------------------------------ comandos
@@ -150,9 +178,13 @@ def cmd_init(repo, args):
 
     cfg.setdefault("projetos", {})
     novos = 0
-    for nome, _caminho in achados:
+    for nome, caminho in achados:
+        if _ignorado_pelo_git(repo.root, caminho):
+            print("  (ignorado pelo git, não registrado em .pbidoc.json: %s — use "
+                  "%s/.pbidoc.json para a configuração local)" % (nome, _rel(repo.root, caminho)))
+            continue
         if nome not in cfg["projetos"]:
-            cfg["projetos"][nome] = {}
+            cfg["projetos"][nome] = {"negocio": dict(config.PADRAO["negocio"])}
             novos += 1
     config.salvar(repo.root, cfg)
 
@@ -169,11 +201,13 @@ def cmd_projetos(repo, args):
         man = ctx.manifesto()
         cfg = ctx.cfg()
         descricoes = ctx.descricoes()
-        changes = diff_model.compute(man, descricoes, descrever_colunas=cfg["descrever_colunas"])
+        changes = diff_model.compute(man, descricoes, descrever_colunas=cfg["descrever_colunas"],
+                                     escopo=_escopo(cfg, args))
         pendentes = changes["resumo"]["total_a_escrever"]
-        print("%-30s %-40s docs=%-30s pendentes=%d"
-              % (ctx.nome, _rel(repo.root, ctx.projeto_dir),
-                 _rel(repo.root, ctx.docs_dir()), pendentes))
+        print("%-30s tipo=%-19s %-40s docs=%-30s relatorio=%-3s pendentes=%d"
+              % (ctx.nome, man["projeto"].get("tipo") or "completo",
+                 _rel(repo.root, ctx.projeto_dir), _rel(repo.root, ctx.docs_dir()),
+                 "sim" if man["projeto"].get("report") else "nao", pendentes))
     return 0
 
 
@@ -183,7 +217,14 @@ def cmd_extract(repo, args):
         destino = args.out or ctx.modelo_cache
         extract_model.dump(man, destino)
         est = man["estatisticas"]
-        print("[%s] manifesto em %s" % (ctx.nome, _rel(repo.root, destino)))
+        print("[%s] tipo: %s · manifesto em %s"
+              % (ctx.nome, man["projeto"].get("tipo") or "completo", _rel(repo.root, destino)))
+        if man["projeto"].get("tipo") == "relatorio_conectado":
+            print("  %d páginas · %d visuais · %d medidas de relatório · %d bookmarks · "
+                  "%d tabelas no dataset · %d alertas"
+                  % (est["paginas"], est["visuais"], est["extensoes"], est["bookmarks"],
+                     est["tabelas_dataset"], est["alertas"]))
+            continue
         print("  %d tabelas · %d colunas · %d medidas · %d relacionamentos · %d parâmetros · "
               "%d perfis RLS · %d páginas"
               % (est["tabelas"], est["colunas"], est["medidas"], est["relacionamentos"],
@@ -204,12 +245,14 @@ def cmd_diff(repo, args):
         changes = diff_model.compute(
             man, descricoes,
             descrever_colunas=cfg["descrever_colunas"],
-            limite=args.limite if args.limite and args.limite > 0 else None)
+            limite=args.limite if args.limite and args.limite > 0 else None,
+            escopo=_escopo(cfg, args))
         destino = args.out or ctx.mudancas
         diff_model.dump(changes, destino)
 
         r = changes["resumo"]
-        print("[%s] modo: %s" % (ctx.nome, changes["modo"]))
+        print("[%s] tipo: %s · escopo: %s · modo: %s"
+              % (ctx.nome, changes["tipo_projeto"], changes["escopo"], changes["modo"]))
         print("  novos=%d alterados=%d pendentes=%d removidos=%d -> %d a escrever%s"
               % (r["novos"], r["alterados"], r["pendentes"], r["removidos"],
                  r["total_a_escrever"], " (truncado)" if r["truncado"] else ""))
@@ -236,14 +279,18 @@ def _escrever_indice_docs(repo):
         "| Projeto | Descrição | Documentação |",
         "| --- | --- | --- |",
     ]
-    for nome, _caminho in sorted(repo.descobrir(), key=lambda p: p[0].lower()):
-        cfg = config.resolver_projeto(cfg_raiz, nome)
+    for nome, caminho in sorted(repo.descobrir(), key=lambda p: p[0].lower()):
+        if _ignorado_pelo_git(repo.root, caminho):
+            continue          # projeto local/temporário: não entra no índice versionado
+        cfg = config.resolver_projeto(cfg_raiz, nome, caminho)
         titulo = cfg.get("titulo") or nome
         objetivo = (cfg.get("objetivo") or "—").strip() or "—"
         objetivo = objetivo.replace("|", "\\|").replace("\n", " ")
-        link = "./%s/README.md" % nome
+        link = "./%s/README.md" % quote(nome)
         linhas.append("| **%s** | %s | [Abrir](%s) |" % (titulo, objetivo, link))
     linhas.append("")
+    if len(linhas) <= 7:
+        return None           # nenhum projeto visível: mantém o índice/placeholder existente
 
     conteudo = "\n".join(linhas)
     destino = os.path.join(docs_dir, ARQ_INDICE_DOCS)
@@ -265,6 +312,8 @@ def cmd_render(repo, args):
         formatos_flag.append("md")
     if args.docx:
         formatos_flag.append("docx")
+    if args.negocio:
+        formatos_flag.append("negocio")
 
     for ctx in _contextos(repo, args):
         man = ctx.manifesto()
@@ -281,9 +330,13 @@ def cmd_render(repo, args):
 
         formatos = formatos_flag or list(cfg["formatos"])
 
+        conectado = man["projeto"].get("tipo") == "relatorio_conectado"
         conteudos = {}
         if "md" in formatos:
-            import render_md
+            if conectado:
+                import render_md_relatorio as render_md
+            else:
+                import render_md
             conteudos.update(render_md.render(man, cfg, descricoes))
 
         meta_path = os.path.join(destino, ARQ_META)
@@ -292,10 +345,19 @@ def cmd_render(repo, args):
         escritos = rc.escrever(destino, conteudos)
 
         if "docx" in formatos:
-            import render_docx
+            if conectado:
+                import render_docx_relatorio as render_docx
+            else:
+                import render_docx
             nome_docx = render_docx.render(man, cfg, descricoes, destino, meta)
             if nome_docx:
                 escritos.append(nome_docx)
+
+        if "negocio" in formatos:
+            import render_docx_negocio
+            nome_neg = render_docx_negocio.render(man, cfg, descricoes, destino, meta)
+            if nome_neg:
+                escritos.append(nome_neg)
 
         rc.salvar_json(meta_path, meta)
         extract_model.dump(man, os.path.join(destino, ARQ_MODELO_DOC))
@@ -346,18 +408,20 @@ def cmd_merge(repo, args):
         if caminho_projeto is None:
             raise SystemExit("Projeto não encontrado para os lotes: %s" % nome)
         ctx = Contexto(repo, nome, caminho_projeto)
-        _merge_um(repo, ctx, patches, args.limpar)
+        _merge_um(repo, ctx, patches, args.limpar, args)
     return 0
 
 
-def _merge_um(repo, ctx, patches, limpar):
+def _merge_um(repo, ctx, patches, limpar, args):
     man = ctx.manifesto()
     cfg = ctx.cfg()
     desc_path = ctx.descricoes_path()
     descricoes = rc.carregar_json(desc_path, catalog.vazio(ctx.nome))
     descricoes.setdefault("objetos", {})
 
-    esperado = {i["chave"]: i for i in catalog.build(man, descrever_colunas=cfg["descrever_colunas"])}
+    # valida contra o escopo mais amplo: um lote pode trazer itens de qualquer escopo
+    esperado = {i["chave"]: i for i in catalog.build(
+        man, descrever_colunas=cfg["descrever_colunas"], escopo="negocio")}
     aplicados = ignorados = 0
     avisos = []
 
@@ -413,7 +477,8 @@ def _merge_um(repo, ctx, patches, limpar):
         print("  aviso: %s" % aviso)
     if len(avisos) > 15:
         print("  ... e mais %d avisos" % (len(avisos) - 15))
-    restante = diff_model.compute(man, descricoes, descrever_colunas=cfg["descrever_colunas"])
+    restante = diff_model.compute(man, descricoes, descrever_colunas=cfg["descrever_colunas"],
+                                  escopo=_escopo(cfg, args))
     print("  ainda faltam %d descrições" % restante["resumo"]["total_a_escrever"])
 
 
@@ -422,13 +487,30 @@ def cmd_status(repo, args):
         man = ctx.manifesto()
         cfg = ctx.cfg()
         descricoes = ctx.descricoes()
-        changes = diff_model.compute(man, descricoes, descrever_colunas=cfg["descrever_colunas"])
-        itens = catalog.build(man, descrever_colunas=cfg["descrever_colunas"])
+        escopo = _escopo(cfg, args)
+        changes = diff_model.compute(man, descricoes, descrever_colunas=cfg["descrever_colunas"],
+                                     escopo=escopo)
+        itens = catalog.build(man, descrever_colunas=cfg["descrever_colunas"], escopo=escopo)
         total = len(itens)
         faltando = changes["resumo"]["total_a_escrever"]
-        print("[%s]" % ctx.nome)
+        print("[%s] (tipo %s · escopo %s)"
+              % (ctx.nome, man["projeto"].get("tipo") or "completo", escopo))
         print("  Documentação: %s" % _rel(repo.root, ctx.docs_dir()))
         print("  Descrições: %d/%d preenchidas (%d pendentes)" % (total - faltando, total, faltando))
+        alertas = man["relatorio"].get("alertas") or []
+        if alertas:
+            print("  Alertas de qualidade do relatório (%d):" % len(alertas))
+            for al in alertas[:12]:
+                print("    - %s: %s" % (al["tipo"], al["detalhe"][:140]))
+            if len(alertas) > 12:
+                print("    ... e mais %d (veja relatorio.alertas em _model.json)" % (len(alertas) - 12))
+        if escopo == "negocio":
+            import render_docx_negocio
+            faltas = render_docx_negocio.campos_a_preencher(cfg, man)
+            print("  Informações a preencher no documento de negócio (%s): %d"
+                  % (render_docx_negocio.MARCADOR, len(faltas)))
+            for campo, rotulo in faltas:
+                print("    - negocio.%s — %s" % (campo, rotulo))
         revisar = [k for k, v in (descricoes.get("objetos") or {}).items()
                    if isinstance(v, dict) and v.get("revisar")]
         if revisar:
@@ -461,19 +543,24 @@ def main(argv=None):
     s = sub.add_parser("diff", help="lista o que precisa de descrição nova")
     s.add_argument("--out")
     s.add_argument("--limite", type=int, default=0)
+    s.add_argument("--escopo", choices=catalog.ESCOPOS,
+                   help="tecnico (md/glossário) ou negocio (acrescenta páginas do relatório)")
     s.set_defaults(func=cmd_diff)
 
     s = sub.add_parser("render", help="gera a documentação")
     s.add_argument("--md", action="store_true")
-    s.add_argument("--docx", action="store_true")
+    s.add_argument("--docx", action="store_true", help="glossário técnico em .docx")
+    s.add_argument("--negocio", action="store_true", help="documentação de negócio em .docx")
     s.set_defaults(func=cmd_render)
 
     s = sub.add_parser("merge", help="mescla lotes de descrições em _descriptions.json")
     s.add_argument("patches", nargs="+")
     s.add_argument("--limpar", action="store_true", help="apaga os lotes após mesclar")
+    s.add_argument("--escopo", choices=catalog.ESCOPOS)
     s.set_defaults(func=cmd_merge)
 
     s = sub.add_parser("status", help="resumo do estado da documentação")
+    s.add_argument("--escopo", choices=catalog.ESCOPOS)
     s.set_defaults(func=cmd_status)
 
     args = p.parse_args(argv)

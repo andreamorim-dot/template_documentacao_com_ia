@@ -74,7 +74,8 @@ INSTRUCAO = (
     "apenas os campos pedidos em `campos`; deixe os demais como string vazia (ou "
     "lista vazia, em `passos`). Em `passos`, use exatamente os nomes recebidos em "
     "`contexto.passos`. Se não houver base para descrever um objeto, marque "
-    "`revisar: true` e deixe os campos vazios."
+    "`revisar: true` e deixe os campos vazios. Em itens `pagina`, descreva apenas o que "
+    "os visuais listados mostram, sem inventar objetivo ou público."
 )
 
 

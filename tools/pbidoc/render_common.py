@@ -123,6 +123,9 @@ class Prosa:
     def rls(self, nome, padrao=""):
         return self.get(catalog.key_rls(nome), "descricao", padrao)
 
+    def pagina(self, nome, padrao=""):
+        return self.get(catalog.key_pagina(nome), "descricao", padrao)
+
     def visao_geral(self, padrao=""):
         return self.get("visao_geral", "texto", padrao)
 

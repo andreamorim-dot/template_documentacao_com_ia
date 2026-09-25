@@ -229,53 +229,544 @@ def _find_visual_type(obj):
     return None
 
 
+def _ler_json(path):
+    try:
+        with open(path, encoding="utf-8-sig") as fh:
+            return json.load(fh)
+    except (ValueError, OSError):
+        return None
+
+
+def _entidade(expr):
+    """Nome da tabela de um `{"SourceRef": {"Entity": ...}}` (ou None)."""
+    ref = (expr or {}).get("SourceRef") or {}
+    return ref.get("Entity") or ref.get("Source")
+
+
+def _eh_extensao(expr):
+    """True se a referência aponta para o esquema de extensões do relatório."""
+    return ((expr or {}).get("SourceRef") or {}).get("Schema") == "extension"
+
+
+# código de `Aggregation.Function` do PBIR -> rótulo (na interface: "Contagem (distinta)" = 2,
+# "Contagem" = 5)
+AGREGACAO = {0: "Soma", 1: "Média", 2: "Contagem distinta", 3: "Mínimo", 4: "Máximo",
+             5: "Contagem", 6: "Mediana", 7: "Desvio padrão", 8: "Variância"}
+
+
+def _campo(field):
+    """Normaliza o `field` de uma projeção/filtro do PBIR em {tabela, campo, tipo}."""
+    if not isinstance(field, dict):
+        return None
+    if "Measure" in field:
+        f = field["Measure"]
+        return {"tabela": _entidade(f.get("Expression")), "campo": f.get("Property"),
+                "tipo": "medida", "extensao": _eh_extensao(f.get("Expression"))}
+    if "Column" in field:
+        f = field["Column"]
+        return {"tabela": _entidade(f.get("Expression")), "campo": f.get("Property"),
+                "tipo": "coluna", "extensao": False}
+    if "Aggregation" in field:
+        interno = _campo((field["Aggregation"] or {}).get("Expression"))
+        if interno:
+            interno["tipo"] = "agregacao"
+            interno["agregacao"] = AGREGACAO.get((field["Aggregation"] or {}).get("Function"))
+        return interno
+    if "HierarchyLevel" in field:
+        f = field["HierarchyLevel"]
+        hier = ((f.get("Expression") or {}).get("Hierarchy") or {})
+        base = hier.get("Expression") or {}
+        variacao = base.get("PropertyVariationSource")
+        if variacao:
+            # hierarquia automática de data: a coluna é a origem da variação; `nivel` é o
+            # nível usado no visual (Ano, Trimestre, Mês, Dia)
+            return {"tabela": _entidade(variacao.get("Expression")),
+                    "campo": variacao.get("Property"), "tipo": "coluna", "extensao": False,
+                    "nivel": f.get("Level")}
+        return {"tabela": _entidade(base), "campo": f.get("Level"),
+                "tipo": "coluna", "extensao": False}
+    return None
+
+
+def _literal(v):
+    lit = (v or {}).get("Literal") or {}
+    valor = lit.get("Value")
+    if not isinstance(valor, str):
+        return None
+    valor = valor.strip()
+    if len(valor) >= 2 and valor[0] == valor[-1] == "'":
+        return valor[1:-1].replace("''", "'")
+    if valor.endswith(("L", "D", "M")) and valor[:-1].replace(".", "", 1).lstrip("-").isdigit():
+        return valor[:-1]
+    if valor.startswith("datetime'"):
+        return valor[len("datetime'"):-1][:10]
+    return valor
+
+
+def _lit(bloco):
+    """`{"expr": {"Literal": {...}}}` (valor de propriedade de objeto) -> texto."""
+    return _literal((bloco or {}).get("expr"))
+
+
+def _prop(objs, grupo, nome, idx=0):
+    try:
+        return _lit(objs[grupo][idx]["properties"][nome])
+    except (KeyError, IndexError, TypeError):
+        return None
+
+
+COMPARACAO = {0: "=", 1: ">", 2: ">=", 3: "<", 4: "<="}
+
+
+def _descrever_condicao(cond):
+    if not isinstance(cond, dict):
+        return None
+    if "Not" in cond:
+        interno = _descrever_condicao((cond["Not"] or {}).get("Expression"))
+        return ("exceto " + interno[3:]) if interno and interno.startswith("em ") else (
+            "não (%s)" % interno if interno else None)
+    if "In" in cond:
+        valores = []
+        for linha in (cond["In"] or {}).get("Values") or []:
+            for v in linha:
+                lit = _literal(v)
+                if lit is not None:
+                    valores.append(lit)
+        return "em " + ", ".join(valores) if valores else None
+    if "Comparison" in cond:
+        c = cond["Comparison"] or {}
+        lit = _literal(c.get("Right"))
+        if lit is None:
+            return None
+        prefixo = "participação no total " if "Arithmetic" in (c.get("Left") or {}) else ""
+        return "%s%s %s" % (prefixo, COMPARACAO.get(c.get("ComparisonKind"), "?"), lit)
+    for op, rotulo in (("And", " e "), ("Or", " ou ")):
+        if op in cond:
+            a = _descrever_condicao((cond[op] or {}).get("Left"))
+            b = _descrever_condicao((cond[op] or {}).get("Right"))
+            if a and b:
+                return a + rotulo + b
+            return None
+    return None
+
+
+def _achar(obj, chave):
+    """Primeiro valor da `chave` em qualquer nível de um JSON aninhado (ou None)."""
+    if isinstance(obj, dict):
+        if chave in obj:
+            return obj[chave]
+        for v in obj.values():
+            r = _achar(v, chave)
+            if r is not None:
+                return r
+    elif isinstance(obj, list):
+        for v in obj:
+            r = _achar(v, chave)
+            if r is not None:
+                return r
+    return None
+
+
+UNIDADE_TEMPO = {0: "dia(s)", 1: "semana(s)", 2: "mês(es)", 3: "trimestre(s)", 4: "ano(s)"}
+
+
+def _condicao_especial(flt):
+    """Texto para filtros que não são listas/comparações simples (TopN, data relativa...)."""
+    tipo = flt.get("type")
+    corpo = flt.get("filter") or {}
+    if tipo == "TopN":
+        n = _achar(corpo, "Top")
+        medida = None
+        ordem = _achar(corpo, "OrderBy")
+        if isinstance(ordem, list) and ordem:
+            m = _campo(((ordem[0] or {}).get("Expression")) or {})
+            medida = m and m.get("campo")
+        if isinstance(n, int):
+            return "Top %d%s" % (n, " por %s" % medida if medida else "")
+        return "Top N"
+    if tipo in ("RelativeDate", "RelativeTime"):
+        qtd = _achar(corpo, "Amount")
+        unidade = UNIDADE_TEMPO.get(_achar(corpo, "TimeUnit"))
+        if isinstance(qtd, int) and unidade:
+            return "período relativo (%d %s)" % (abs(qtd), unidade)
+        return "período relativo"
+    return None
+
+
+def _parse_filtros(dono):
+    """Filtros de `filterConfig` (relatório, página ou visual)."""
+    saida = []
+    for flt in ((dono or {}).get("filterConfig") or {}).get("filters") or []:
+        campo = _campo(flt.get("field"))
+        if not campo or not campo.get("campo"):
+            continue
+        cond = None
+        aplicado = bool(flt.get("filter"))
+        if aplicado:
+            wheres = (flt["filter"] or {}).get("Where") or []
+            partes = [_descrever_condicao(w.get("Condition")) for w in wheres]
+            if flt.get("type") in ("TopN", "RelativeDate", "RelativeTime"):
+                cond = _condicao_especial(flt)
+            elif partes and all(partes):
+                cond = "; ".join(partes)
+            else:
+                cond = "condição avançada"
+        saida.append({
+            "tabela": campo["tabela"],
+            "campo": campo["campo"],
+            "tipo_campo": campo["tipo"],
+            "tipo_filtro": flt.get("type") or "—",
+            "aplicado": aplicado,
+            "condicao": cond,
+            "criado_como": flt.get("howCreated"),
+            "oculto": bool(flt.get("isHiddenInViewMode")),
+            "bloqueado": bool(flt.get("isLockedInViewMode")),
+        })
+    return saida
+
+
+def _titulo_visual(visual):
+    try:
+        valor = visual["visualContainerObjects"]["title"][0]["properties"]["text"]["expr"]
+    except (KeyError, IndexError, TypeError):
+        return None
+    lit = _literal(valor)
+    return lit or None
+
+
+def _texto_caixa(objs):
+    """Texto de uma caixa de texto (`textbox`): parágrafos separados por quebra de linha."""
+    try:
+        paragrafos = objs["general"][0]["properties"]["paragraphs"]
+    except (KeyError, IndexError, TypeError):
+        return None
+    linhas = []
+    for p in paragrafos or []:
+        t = "".join(r.get("value", "") for r in (p or {}).get("textRuns") or [])
+        if t.strip():
+            linhas.append(t.strip())
+    return "\n".join(linhas) or None
+
+
+def _parse_visual(vis):
+    visual = vis.get("visual") or {}
+    tipo = _find_visual_type(visual or vis) or "desconhecido"
+    objs = visual.get("objects") or {}
+    vco = visual.get("visualContainerObjects") or {}
+    campos, vistos = [], set()
+    estado = ((visual.get("query") or {}).get("queryState") or {})
+    for papel in sorted(estado):
+        for proj in (estado[papel] or {}).get("projections") or []:
+            c = _campo(proj.get("field"))
+            if not c or not c.get("campo"):
+                continue
+            chave = (c["tabela"], c["campo"], papel)
+            if chave in vistos:
+                if c.get("nivel"):        # outro nível da mesma hierarquia de data
+                    for existente in campos:
+                        if (existente["tabela"], existente["campo"], existente["papel"]) == chave:
+                            niveis = existente.get("nivel") or ""
+                            if c["nivel"] not in niveis.split(", "):
+                                existente["nivel"] = (niveis + ", " if niveis else "") + c["nivel"]
+                continue
+            vistos.add(chave)
+            c["papel"] = papel
+            c["rotulo"] = proj.get("displayName") or proj.get("nativeQueryRef") or c["campo"]
+            campos.append(c)
+    ordenacao = []
+    for s in (((visual.get("query") or {}).get("sortDefinition") or {}).get("sort") or []):
+        c = _campo(s.get("field"))
+        if c and c.get("campo"):
+            ordenacao.append({"tabela": c["tabela"], "campo": c["campo"],
+                              "direcao": "crescente" if s.get("direction") == "Ascending"
+                              else "decrescente"})
+    pos = vis.get("position") or {}
+    v = {
+        "id": vis.get("name"),
+        "tipo": tipo,
+        "titulo": _titulo_visual(visual),
+        "campos": campos,
+        "ordenacao": ordenacao,
+        "filtros": _parse_filtros(vis),
+        "oculto": bool(vis.get("isHidden")),
+        "grupo": vis.get("parentGroupName"),
+        "tooltip_pagina": _prop(objs, "visualTooltip", "section")
+        or _prop(vco, "visualTooltip", "section"),
+        "_pos": (round(pos.get("y") or 0), round(pos.get("x") or 0)),
+    }
+    if tipo == "slicer":
+        v["segmentacao"] = {"modo": _prop(objs, "data", "mode"),
+                            "cabecalho": _prop(objs, "header", "text"),
+                            "sync": (visual.get("syncGroup") or vis.get("syncGroup") or {}).get("groupName")}
+    elif tipo == "textbox":
+        v["texto"] = _texto_caixa(objs)
+    elif tipo == "actionButton":
+        link = (vco.get("visualLink") or [{}])[0].get("properties") or {}
+        v["botao"] = {
+            "icone": _prop(objs, "icon", "shapeType"),
+            "alt": _prop(vco, "general", "altText"),
+            "acao": _lit(link.get("type")),
+            "tooltip": _lit(link.get("tooltip")),
+            "pagina_destino": _lit(link.get("navigationSection")),
+            "bookmark": _lit(link.get("bookmark")),
+        }
+    return v
+
+
+# nomes de coluna que sugerem dado pessoal (só o NOME; nunca valores)
+PESSOAL_RE = re.compile(r"(e-?mail|cpf|cnpj|telefone|celular|nascimento|endere[cç]o|\brg\b)",
+                        re.IGNORECASE)
+TABELAS_PESSOAIS_RE = re.compile(r"(usu[aá]rio|aluno|cliente|pessoa|funcion[aá]rio|colaborador)",
+                                 re.IGNORECASE)
+
+
+def _coluna_pessoal(tabela, campo):
+    if PESSOAL_RE.search(campo or ""):
+        return True
+    return bool(re.fullmatch(r"(nome|usuario|usuário|login)", (campo or "").lower())
+                and TABELAS_PESSOAIS_RE.search(tabela or ""))
+
+
+def _dax_referencias(dax):
+    """Colunas/medidas citadas por uma expressão DAX de extensão (só nomes)."""
+    limpo = _strip_dax_comments(dax)
+    colunas = set()
+    for tbl, col in re.findall(r"'((?:[^']|'')*)'\s*\[([^\]]+)\]", limpo):
+        colunas.add("%s[%s]" % (tbl.replace("''", "'"), col))
+    for tbl, col in re.findall(r"(?<![\]'\w])([A-Za-z_]\w*)\s*\[([^\]]+)\]", limpo):
+        colunas.add("%s[%s]" % (tbl, col))
+    sem_tabela = set(re.findall(r"(?<![\w'\]])\[([^\]]+)\]", limpo))
+    return sorted(colunas), sorted(sem_tabela)
+
+
+def _extensoes(report_dir):
+    """Medidas definidas no próprio relatório (`definition/reportExtensions.json`)."""
+    dados = _ler_json(os.path.join(report_dir, "definition", "reportExtensions.json")) or {}
+    saida = []
+    for ent in dados.get("entities") or []:
+        for m in ent.get("measures") or []:
+            dax = m.get("expression") or ""
+            cols, meds = _dax_referencias(dax)
+            saida.append({
+                "tabela": ent.get("name"),
+                "nome": m.get("name"),
+                "dax": dax,
+                "tipo_dado": m.get("dataType"),
+                "formato": m.get("formatString"),
+                "pasta": m.get("displayFolder"),
+                "colunas_citadas": cols,
+                "medidas_citadas": meds,
+                "hash": _sha1(ent.get("name"), m.get("name"), dax, m.get("formatString") or ""),
+            })
+    saida.sort(key=lambda e: ((e["pasta"] or "").lower(), (e["nome"] or "").lower()))
+    return saida
+
+
+def _tema(report_dir, report):
+    col = (report or {}).get("themeCollection") or {}
+    saida = {"base": (col.get("baseTheme") or {}).get("name"),
+             "personalizado": (col.get("customTheme") or {}).get("name"), "cores": []}
+    if saida["personalizado"]:
+        for caminho in glob.glob(os.path.join(report_dir, "StaticResources", "**",
+                                              saida["personalizado"] + ".json"), recursive=True):
+            tema = _ler_json(caminho) or {}
+            saida["cores"] = tema.get("dataColors") or []
+            break
+    return saida
+
+
+def _bookmarks(report_dir, ids_pagina):
+    """Bookmarks do relatório. Só metadados: o estado salvo (filtros/valores) é ignorado."""
+    base = os.path.join(report_dir, "definition", "bookmarks")
+    lista = _ler_json(os.path.join(base, "bookmarks.json")) or {}
+    ordem = [i.get("name") for i in lista.get("items") or [] if i.get("name")]
+    saida = []
+    for caminho in sorted(glob.glob(os.path.join(base, "*.bookmark.json"))):
+        b = _ler_json(caminho) or {}
+        secao = (b.get("explorationState") or {}).get("activeSection")
+        opcoes = b.get("options") or {}
+        saida.append({
+            "id": b.get("name"),
+            "nome": b.get("displayName") or b.get("name"),
+            "pagina_id": secao,
+            "pagina": ids_pagina.get(secao, secao),
+            "visuais_alvo": list(opcoes.get("targetVisualNames") or []),
+            "apenas_alvos": bool(opcoes.get("targetVisualNames")),
+            "ordem": ordem.index(b.get("name")) if b.get("name") in ordem else 999,
+        })
+    saida.sort(key=lambda b: (b["ordem"], b["nome"] or ""))
+    return saida
+
+
 def _parse_report(report_dir):
+    vazio = {"paginas": [], "total_visuais": 0, "filtros": [], "campos_usados": [],
+             "extensoes": [], "bookmarks": [], "tema": {}, "configuracoes": {},
+             "sync_groups": [], "alertas": []}
     if not report_dir or not os.path.isdir(report_dir):
-        return {"paginas": [], "total_visuais": 0}
+        return vazio
     pages = []
     order = {}
-    pages_json = os.path.join(report_dir, "definition", "pages", "pages.json")
-    if os.path.isfile(pages_json):
-        try:
-            with open(pages_json, encoding="utf-8-sig") as fh:
-                data = json.load(fh)
-            for i, name in enumerate(data.get("pageOrder", []) or []):
-                order[name] = i
-        except (ValueError, OSError):
-            pass
+    data = _ler_json(os.path.join(report_dir, "definition", "pages", "pages.json")) or {}
+    for i, name in enumerate(data.get("pageOrder", []) or []):
+        order[name] = i
+    report = _ler_json(os.path.join(report_dir, "definition", "report.json")) or {}
+    filtros_relatorio = _parse_filtros(report)
+    extensoes = _extensoes(report_dir)
+    ext_nomes = {(e["tabela"], e["nome"]) for e in extensoes}
+    usados = {}
+
+    def _usar(tabela, campo, tipo, pagina=None):
+        if tabela and campo:
+            tipo = "medida" if tipo == "medida" else "coluna"
+            chave = (tabela, campo)
+            item = usados.setdefault(chave, {"tipo": tipo, "paginas": []})
+            if pagina and pagina not in item["paginas"]:
+                item["paginas"].append(pagina)
+
+    for f in filtros_relatorio:
+        _usar(f["tabela"], f["campo"], f["tipo_campo"], "(relatório)")
+
     for path in sorted(glob.glob(os.path.join(report_dir, "definition", "pages", "*", "page.json"))):
-        try:
-            with open(path, encoding="utf-8-sig") as fh:
-                page = json.load(fh)
-        except (ValueError, OSError):
+        page = _ler_json(path)
+        if page is None:
             continue
         folder = os.path.basename(os.path.dirname(path))
+        nome_pagina = page.get("displayName") or folder
         tipos = {}
-        grupos = 0
+        grupos = []
+        visuais = []
         for vpath in sorted(glob.glob(os.path.join(os.path.dirname(path), "visuals", "*", "visual.json"))):
-            try:
-                with open(vpath, encoding="utf-8-sig") as fh:
-                    vis = json.load(fh)
-            except (ValueError, OSError):
+            vis = _ler_json(vpath)
+            if vis is None:
                 continue
             if not vis.get("visual") and vis.get("visualGroup"):
-                grupos += 1          # contêiner de agrupamento, não é um visual
+                grupos.append({"id": vis.get("name"),
+                               "nome": (vis["visualGroup"] or {}).get("displayName"),
+                               "oculto": bool(vis.get("isHidden"))})
                 continue
-            t = _find_visual_type(vis.get("visual") or vis) or "desconhecido"
-            tipos[t] = tipos.get(t, 0) + 1
+            v = _parse_visual(vis)
+            tipos[v["tipo"]] = tipos.get(v["tipo"], 0) + 1
+            visuais.append(v)
+        visuais.sort(key=lambda v: (v["_pos"], v["id"] or ""))
+        for v in visuais:
+            del v["_pos"]
+            for c in v["campos"]:
+                _usar(c["tabela"], c["campo"], c["tipo"], nome_pagina)
+            for f in v["filtros"]:
+                _usar(f["tabela"], f["campo"], f["tipo_campo"], nome_pagina)
+        filtros_pagina = _parse_filtros(page)
+        for f in filtros_pagina:
+            _usar(f["tabela"], f["campo"], f["tipo_campo"], nome_pagina)
+        binding = page.get("pageBinding") or {}
+        drill = None
+        if binding:
+            drill = {"tipo": binding.get("type"), "escopo": binding.get("referenceScope"),
+                     "campos": [c for c in (
+                         _campo((p or {}).get("fieldExpr")) for p in binding.get("parameters") or [])
+                         if c and c.get("campo")]}
+        assinatura = json.dumps([page.get("displayName"), page.get("type"),
+                                 [(v["tipo"], v["titulo"], [(c["tabela"], c["campo"], c["papel"])
+                                                           for c in v["campos"]])
+                                  for v in visuais]],
+                                sort_keys=True, ensure_ascii=False)
         pages.append({
-            "qtd_grupos": grupos,
+            "qtd_grupos": len(grupos),
+            "grupos": grupos,
             "id": folder,
-            "nome": page.get("displayName") or folder,
+            "nome": nome_pagina,
             "largura": page.get("width"),
             "altura": page.get("height"),
             "oculta": (page.get("visibility") == "HiddenInViewMode"),
+            "tipo": page.get("type") or "Padrao",
+            "exibicao": page.get("displayOption"),
+            "drillthrough": drill,
             "qtd_visuais": sum(tipos.values()),
             "tipos_visuais": dict(sorted(tipos.items())),
             "ordem": order.get(folder, 999),
+            "visuais": visuais,
+            "filtros": filtros_pagina,
+            "hash": _sha1(assinatura),
         })
     pages.sort(key=lambda p: (p["ordem"], p["nome"]))
-    return {"paginas": pages, "total_visuais": sum(p["qtd_visuais"] for p in pages)}
+    ids_pagina = {p["id"]: p["nome"] for p in pages}
+    bookmarks = _bookmarks(report_dir, ids_pagina)
+
+    # ---- resolução de origem (extensão do relatório x dataset) e alertas
+    campos_usados = []
+    for (t, c), info in sorted(usados.items()):
+        campos_usados.append({"tabela": t, "campo": c, "tipo": info["tipo"],
+                              "origem": "extensao" if (t, c) in ext_nomes else "dataset",
+                              "paginas": info["paginas"]})
+    alertas = []
+    for p in pages:
+        for v in p["visuais"]:
+            if v["tooltip_pagina"] and v["tooltip_pagina"] not in ids_pagina:
+                alertas.append({"tipo": "tooltip_inexistente", "pagina": p["nome"],
+                                "visual": v["titulo"] or v["tipo"],
+                                "detalhe": "aponta para a página de tooltip '%s', que não existe"
+                                % v["tooltip_pagina"]})
+    usados_ext = {(c["tabela"], c["campo"]) for c in campos_usados if c["origem"] == "extensao"}
+    citadas = {m for e in extensoes for m in e["medidas_citadas"]}
+    for e in extensoes:
+        if (e["tabela"], e["nome"]) not in usados_ext and e["nome"] not in citadas:
+            alertas.append({"tipo": "extensao_sem_uso_em_visual", "pagina": None, "visual": None,
+                            "detalhe": "a medida de relatório '%s' não aparece em nenhum visual "
+                                       "nem filtro (pode ser usada só em bookmarks ou estar "
+                                       "obsoleta)" % e["nome"]})
+    alvos_bookmark = {v["botao"]["bookmark"] for p in pages for v in p["visuais"]
+                      if v.get("botao") and v["botao"].get("bookmark")}
+    for b in bookmarks:
+        if b["id"] not in alvos_bookmark:
+            alertas.append({"tipo": "bookmark_sem_botao", "pagina": b["pagina"], "visual": None,
+                            "detalhe": "o bookmark '%s' não é acionado por nenhum botão" % b["nome"]})
+    for c in campos_usados:
+        if c["tipo"] == "coluna" and _coluna_pessoal(c["tabela"], c["campo"]):
+            alertas.append({"tipo": "dado_pessoal_exposto", "pagina": ", ".join(c["paginas"]),
+                            "visual": None,
+                            "detalhe": "a coluna %s[%s] tem nome de dado pessoal e é exibida no "
+                                       "relatório" % (c["tabela"], c["campo"])})
+    alts = {}
+    for p in pages:
+        for v in p["visuais"]:
+            a = (v.get("botao") or {}).get("alt")
+            if a:
+                alts[a] = alts.get(a, 0) + 1
+    for a, n in sorted(alts.items()):
+        if n > 3:
+            alertas.append({"tipo": "alt_text_repetido", "pagina": None, "visual": None,
+                            "detalhe": "%d botões usam o mesmo texto alternativo '%s' (acessibilidade)"
+                                       % (n, a)})
+    divergentes = {}
+    for p in pages:
+        for f in p["filtros"]:
+            if f["aplicado"] and f["condicao"]:
+                divergentes.setdefault((f["tabela"], f["campo"]), {}).setdefault(
+                    f["condicao"], []).append(p["nome"])
+    for (t, c), conds in sorted(divergentes.items()):
+        if len(conds) > 1:
+            alertas.append({"tipo": "filtro_divergente_entre_paginas", "pagina": None, "visual": None,
+                            "detalhe": "o filtro de %s[%s] tem condições diferentes por página: %s"
+                                       % (t, c, "; ".join("%s (%s)" % (k, ", ".join(v))
+                                                          for k, v in sorted(conds.items())))})
+    sync = {}
+    for p in pages:
+        for v in p["visuais"]:
+            g = (v.get("segmentacao") or {}).get("sync")
+            if g:
+                sync.setdefault(g, []).append(p["nome"])
+    return {
+        "paginas": pages,
+        "total_visuais": sum(p["qtd_visuais"] for p in pages),
+        "filtros": filtros_relatorio,
+        "campos_usados": campos_usados,
+        "extensoes": extensoes,
+        "bookmarks": bookmarks,
+        "tema": _tema(report_dir, report),
+        "configuracoes": {k: v for k, v in (report.get("settings") or {}).items()
+                          if not isinstance(v, (dict, list))},
+        "sync_groups": [{"grupo": g, "paginas": sorted(set(ps))} for g, ps in sorted(sync.items())],
+        "alertas": alertas,
+    }
 
 
 # ------------------------------------------------------------------ dependências
@@ -300,19 +791,44 @@ def _dependencies(dax, measure_names, columns_by_table):
 # ----------------------------------------------------------------------- pública
 
 
+TIPOS = ("completo", "modelo", "relatorio_conectado")
+
+
+def _tipo(sm, rp):
+    """Tipo do projeto PBIP:
+
+    - `completo`: modelo semântico local + relatório;
+    - `modelo`: só o modelo semântico (sem relatório);
+    - `relatorio_conectado`: só o relatório, ligado a um dataset remoto/externo
+      (`definition.pbir` com `byConnection`, ou `byPath` para um modelo fora da pasta).
+    """
+    if sm and rp:
+        return "completo"
+    return "modelo" if sm else "relatorio_conectado"
+
+
 def find_project(root):
-    """Localiza o .pbip, o SemanticModel e o Report a partir da raiz do projeto."""
+    """Localiza o .pbip, o SemanticModel e o Report a partir da raiz do projeto.
+
+    Um projeto pode ter só o `*.Report` (relatório conectado a um dataset); nesse caso
+    `semantic_model` é None e o nome vem da pasta `<nome>.Report`.
+    """
     pbips = sorted(glob.glob(os.path.join(root, "*.pbip")))
     sm = sorted(glob.glob(os.path.join(root, "*.SemanticModel")))
     rp = sorted(glob.glob(os.path.join(root, "*.Report")))
-    if not sm:
-        raise SystemExit("Nenhuma pasta *.SemanticModel encontrada em %s" % root)
-    name = os.path.basename(sm[0])[:-len(".SemanticModel")]
+    if not sm and not rp:
+        raise SystemExit("Nenhuma pasta *.SemanticModel ou *.Report encontrada em %s" % root)
+    if sm:
+        name = os.path.basename(sm[0])[:-len(".SemanticModel")]
+    else:
+        name = os.path.basename(rp[0])[:-len(".Report")]
     return {
         "nome": name,
+        "pasta": os.path.basename(os.path.abspath(root)),
         "pbip": pbips[0] if pbips else None,
-        "semantic_model": sm[0],
+        "semantic_model": sm[0] if sm else None,
         "report": rp[0] if rp else None,
+        "tipo": _tipo(bool(sm), bool(rp)),
     }
 
 
@@ -320,25 +836,106 @@ def descobrir(repo_root, projetos_dir="projetos"):
     """Lista os projetos PBIP do repositório: pares `(nome, caminho)`.
 
     Procura primeiro em `<repo_root>/<projetos_dir>/*/`, um projeto por
-    subpasta (cada uma contendo um `*.SemanticModel`). Se nenhum for
-    encontrado ali, cai de volta para um único projeto na raiz do
+    subpasta (cada uma contendo um `*.SemanticModel` e/ou um `*.Report`). Se nenhum
+    for encontrado ali, cai de volta para um único projeto na raiz do
     repositório — compatibilidade com um repositório de projeto único.
     """
+    def _eh_projeto(pasta):
+        return bool(glob.glob(os.path.join(pasta, "*.SemanticModel"))
+                    or glob.glob(os.path.join(pasta, "*.Report")))
+
     base = os.path.join(repo_root, projetos_dir)
     encontrados = []
     if os.path.isdir(base):
         for nome in sorted(os.listdir(base)):
             caminho = os.path.join(base, nome)
-            if os.path.isdir(caminho) and glob.glob(os.path.join(caminho, "*.SemanticModel")):
+            if os.path.isdir(caminho) and _eh_projeto(caminho):
                 encontrados.append((nome, caminho))
-    if not encontrados and glob.glob(os.path.join(repo_root, "*.SemanticModel")):
+    if not encontrados and _eh_projeto(repo_root):
         proj = find_project(repo_root)
         encontrados.append((proj["nome"], repo_root))
     return encontrados
 
 
+def _dataset(proj):
+    """Como o relatório se liga ao dataset: `definition.pbir` (`datasetReference`).
+
+    Devolve só metadados de conexão (servidor, catálogo, id do modelo, modo de acesso) e,
+    para relatório conectado, os nomes das tabelas do dataset que aparecem no
+    `semanticModelDiagramLayout.json`. Nunca lê a pasta de cache local do Power BI nem
+    dados.
+    """
+    saida = {"referencia": None, "servidor": None, "catalogo": None, "modelo_id": None,
+             "modo_acesso": None, "seguranca": None, "caminho": None, "tabelas": []}
+    rp = proj["report"]
+    if not rp:
+        return saida
+    ref = (_ler_json(os.path.join(rp, "definition.pbir")) or {}).get("datasetReference") or {}
+    if "byConnection" in ref:
+        conn = ref["byConnection"] or {}
+        saida["referencia"] = "byConnection"
+        partes = {}
+        for trecho in (conn.get("connectionString") or "").split(";"):
+            if "=" in trecho:
+                k, v = trecho.split("=", 1)
+                partes[k.strip().lower()] = v.strip()
+        saida["servidor"] = partes.get("data source")
+        saida["catalogo"] = partes.get("initial catalog") or conn.get("pbiModelDatabaseName")
+        saida["modelo_id"] = partes.get("semanticmodelid") or conn.get("pbiServiceModelId")
+        saida["modo_acesso"] = partes.get("access mode")
+        saida["seguranca"] = partes.get("integrated security")
+    elif "byPath" in ref:
+        saida["referencia"] = "byPath"
+        saida["caminho"] = (ref["byPath"] or {}).get("path")
+    if not proj["semantic_model"]:
+        layout = _ler_json(os.path.join(rp, "semanticModelDiagramLayout.json")) or {}
+        nomes = set()
+        for diagrama in layout.get("diagrams") or []:
+            for no in diagrama.get("nodes") or []:
+                if no.get("nodeIndex"):
+                    nomes.add(no["nodeIndex"])
+        saida["tabelas"] = sorted(nomes, key=str.lower)
+    return saida
+
+
+def _estatisticas_relatorio(relatorio):
+    return {"paginas": len(relatorio["paginas"]), "visuais": relatorio["total_visuais"],
+            "extensoes": len(relatorio.get("extensoes") or []),
+            "bookmarks": len(relatorio.get("bookmarks") or []),
+            "alertas": len(relatorio.get("alertas") or [])}
+
+
+def _extract_conectado(proj):
+    """Manifesto de um relatório conectado: não há TMDL, só o que o relatório revela."""
+    relatorio = _parse_report(proj["report"])
+    dataset = _dataset(proj)
+    fontes = []
+    if dataset["catalogo"]:
+        fontes.append("Dataset %s (Power BI)" % dataset["catalogo"])
+    est = {"tabelas": 0, "colunas": 0, "colunas_calculadas": 0, "medidas": 0,
+           "relacionamentos": 0, "relacionamentos_auto_data": 0, "tabelas_auto_data": 0,
+           "parametros": 0, "perfis_rls": 0, "tabelas_dataset": len(dataset["tabelas"])}
+    est.update(_estatisticas_relatorio(relatorio))
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "projeto": {
+            "nome": proj["nome"], "pasta": proj["pasta"], "tipo": proj["tipo"],
+            "pbip": os.path.basename(proj["pbip"]) if proj["pbip"] else None,
+            "semantic_model": None,
+            "report": os.path.basename(proj["report"]),
+            "dataset": dataset,
+            "nivel_compatibilidade": None, "culture": None, "fontes_dados": fontes,
+            "inteligencia_tempo_automatica": False,
+        },
+        "tabelas": [], "medidas": [], "relacionamentos": [], "parametros": [],
+        "perfis_rls": [], "relatorio": relatorio, "estatisticas": est,
+    }
+
+
 def extract(root):
     proj = find_project(root)
+    if not proj["semantic_model"]:
+        return _extract_conectado(proj)
     defdir = os.path.join(proj["semantic_model"], "definition")
 
     model_nodes = T.parse_file(os.path.join(defdir, "model.tmdl"))
@@ -407,10 +1004,14 @@ def extract(root):
         for t in tables if t["origem"].get("tipo") and t["origem"]["tipo"] != "desconhecida"
     })
 
+    relatorio = _parse_report(proj["report"])
     manifest = {
         "schema_version": SCHEMA_VERSION,
         "projeto": {
             "nome": proj["nome"],
+            "pasta": proj["pasta"],
+            "tipo": proj["tipo"],
+            "dataset": _dataset(proj),
             "pbip": os.path.basename(proj["pbip"]) if proj["pbip"] else None,
             "semantic_model": os.path.basename(proj["semantic_model"]),
             "report": os.path.basename(proj["report"]) if proj["report"] else None,
@@ -424,7 +1025,7 @@ def extract(root):
         "relacionamentos": rels,
         "parametros": params,
         "perfis_rls": roles,
-        "relatorio": _parse_report(proj["report"]),
+        "relatorio": relatorio,
         "estatisticas": {
             "tabelas": len(tables),
             "colunas": sum(t["qtd_colunas"] for t in tables),
@@ -435,11 +1036,9 @@ def extract(root):
             "tabelas_auto_data": auto_date_tables,
             "parametros": len(params),
             "perfis_rls": len(roles),
-            "paginas": len(_parse_report(proj["report"])["paginas"]),
         },
     }
-    manifest["estatisticas"]["paginas"] = len(manifest["relatorio"]["paginas"])
-    manifest["estatisticas"]["visuais"] = manifest["relatorio"]["total_visuais"]
+    manifest["estatisticas"].update(_estatisticas_relatorio(relatorio))
     return manifest
 
 

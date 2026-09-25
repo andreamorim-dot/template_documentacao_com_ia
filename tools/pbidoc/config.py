@@ -19,7 +19,7 @@ import os
 PADRAO = {
     "projetos_dir": "projetos",      # onde procurar as subpastas de projeto
     "docs_dir": "docs",
-    "formatos": ["md", "docx"],
+    "formatos": ["md", "docx"],      # md, docx (técnico) e/ou negocio
     "descrever_colunas": True,
     "modelo": "sonnet",
     "timeout": 900,
@@ -32,6 +32,26 @@ PADRAO = {
     "frequencia_atualizacao": "",
     "objetivo": "",
     "estilo_docx": {},                # fontes/cores do .docx — ver docx_writer.aplicar_estilo
+    # informações do documento de negócio que não existem nos arquivos do PBIP;
+    # campo vazio vira o marcador [PREENCHER: …] no .docx de negócio
+    "negocio": {
+        "link_relatorio": "",
+        "link_dataset": "",
+        "objetivo": "",
+        "owner_tecnico": "",
+        "owner_negocio": "",
+        "publico_area": "",
+        "publico_clientes": "",
+        "publico_perfis": "",
+        "propriedade": "",
+        "plataforma_origem": "",
+        "data_criacao_dashboard": "",
+        "data_atualizacao_dashboard": "",
+        "frequencia_atualizacao": "",
+        "status": "",
+        "duvidas_frequentes": [],    # [{"pergunta": "...", "resposta": "..."}]
+        "filtro_padrao_obs": "",
+    },
     "projetos": {},                  # overrides por projeto: {"<nome>": {...}}
 }
 
@@ -60,19 +80,49 @@ def salvar(root, cfg):
         fh.write("\n")
 
 
-def resolver_projeto(cfg_raiz, nome):
-    """Mescla PADRAO -> globais de `.pbidoc.json` -> `projetos[<nome>]`.
+def _copiar(valor):
+    if isinstance(valor, dict):
+        return {k: _copiar(v) for k, v in valor.items()}
+    return list(valor) if isinstance(valor, list) else valor
 
+
+def _mesclar(base, novo):
+    """Mescla `novo` em `base`: dicts (`negocio`, `estilo_docx`) chave a chave, o resto
+    por substituição — assim um projeto sobrescreve só `negocio.owner_tecnico`, por
+    exemplo, sem perder as demais chaves definidas globalmente."""
+    for k, v in novo.items():
+        if isinstance(v, dict) and isinstance(base.get(k), dict):
+            _mesclar(base[k], v)
+        else:
+            base[k] = _copiar(v)
+
+
+def resolver_projeto(cfg_raiz, nome, projeto_dir=None):
+    """Mescla PADRAO -> globais de `.pbidoc.json` -> `projetos[<nome>]` ->
+    `<projeto_dir>/.pbidoc.json` (config local do projeto, opcional).
+
+    O arquivo dentro da pasta do projeto serve para projetos que não são versionados
+    (ou que têm configuração própria): vale por último e não precisa de `projetos`.
+
+    Dicts (`negocio`, `estilo_docx`) são mesclados chave a chave (ver `_mesclar`).
     `nome` é sempre o nome da subpasta em `projetos/` (ou o nome derivado do
     `*.SemanticModel` no modo de projeto único) — é ele que determina
     `docs/<nome>/` e `.pbidoc-cache/<nome>/`, então `cfg["projeto"]` nunca é
     sobrescrito por um valor do arquivo de configuração.
     """
-    cfg = dict(PADRAO)
-    globais = {k: v for k, v in cfg_raiz.items() if k != "projetos"}
-    cfg.update(globais)
+    cfg = _copiar(PADRAO)
+    _mesclar(cfg, {k: v for k, v in cfg_raiz.items() if k != "projetos"})
     overrides = (cfg_raiz.get("projetos") or {}).get(nome) or {}
-    cfg.update({k: v for k, v in overrides.items() if k != "projetos"})
+    _mesclar(cfg, {k: v for k, v in overrides.items() if k != "projetos"})
+    if projeto_dir:
+        local = os.path.join(projeto_dir, NOME_ARQUIVO)
+        if os.path.isfile(local):
+            try:
+                with open(local, encoding="utf-8") as fh:
+                    _mesclar(cfg, {k: v for k, v in (json.load(fh) or {}).items()
+                                   if k != "projetos"})
+            except (ValueError, OSError) as exc:
+                raise SystemExit("%s inválido: %s" % (local, exc))
     cfg["projeto"] = nome
     if not cfg.get("titulo"):
         cfg["titulo"] = nome.replace("_", " ").replace("-", " ").upper()
