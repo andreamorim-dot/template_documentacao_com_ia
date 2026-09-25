@@ -1,10 +1,10 @@
 # Template de documentação com IA para projetos Power BI (PBIP)
 
-Duas skills, um pipeline determinístico e um *hook* de pre-commit que mantêm a
+Três skills, um pipeline determinístico e um *hook* de pre-commit que mantêm a
 documentação de um ou mais modelos semânticos Power BI sempre igual ao que está
-publicado — em Markdown e em Word — gastando o mínimo possível de tokens. Funciona
-com o Claude Code e com qualquer harness que leia `AGENTS.md` (testado com
-OpenCode).
+publicado — em Markdown, em Word técnico e em Word de negócio — gastando o mínimo
+possível de tokens. Funciona com o Claude Code, o OpenCode, o Google Antigravity e
+qualquer harness que leia `AGENTS.md`.
 
 ## Sumário
 
@@ -92,30 +92,77 @@ docs/
 ├── vendas/                documentação do projeto "vendas"
 └── rh/                    documentação do projeto "rh"
 
+docs/templates/          documentos-modelo Word (técnico e negócio)
+
 tools/
 ├── pbidoc/                pipeline determinístico (extração + render)
-└── guardrails/            política de bloqueio de leitura
+├── guardrails/            política de bloqueio de leitura
+└── sync_skills.py         espelha .claude/skills em .agents/skills
 
 .claude/
 ├── settings.json          modelo, permissões, hook de guardrails (Claude Code)
-└── skills/
-    ├── pbi-doc-md/        gera a documentação em Markdown
-    ├── pbi-doc-docx/      gera a documentação em Word
+└── skills/                FONTE das skills
+    ├── pbi-doc-md/        documentação técnica em Markdown
+    ├── pbi-doc-docx/      documentação técnica em Word (glossário)
+    ├── pbi-doc-negocio/   documentação de negócio em Word
     └── guardrails/        política de segurança, explicada para o assistente
+
+.agents/
+├── skills/                cópia gerada das skills, para o Antigravity (não edite)
+└── hooks.json             mesmo guardrail, para o Antigravity
 
 .opencode/plugins/pbi-guard.js   mesmo guardrail, para o OpenCode
 opencode.json                     configuração do OpenCode
-hooks/pre-commit                  mantém docs/ sincronizado a cada commit
+hooks/pre-commit                  mantém docs/ e .agents/skills sincronizados
 AGENTS.md                         instruções universais (qualquer harness)
 ```
+
+### Harnesses e skills
+
+| Harness | Instruções | Skills | Guardrails em tempo de execução |
+| --- | --- | --- | --- |
+| Claude Code | `CLAUDE.md` (importa `AGENTS.md`) | `.claude/skills/` | `.claude/settings.json` |
+| OpenCode | `AGENTS.md` + `opencode.json` | via `opencode.json` | `.opencode/plugins/pbi-guard.js` |
+| Google Antigravity | `AGENTS.md` (lido nativamente) | `.agents/skills/` | `.agents/hooks.json` |
+
+As skills têm **uma única fonte, `.claude/skills/`**. O Antigravity lê skills de
+`.agents/skills/` (e não de `.claude/skills/`), então essa pasta é uma **cópia
+gerada** por `python3 tools/sync_skills.py` — o `hooks/pre-commit` a atualiza a cada
+commit, e `python3 tools/sync_skills.py --check` (para CI) falha se estiver
+desatualizada. Copia-se em vez de usar symlink porque symlinks no git exigem
+configuração especial no Windows e quebram em `/mnt/c` no WSL.
 
 Veja [`projetos/README.md`](projetos/README.md) para o passo a passo de adicionar
 um projeto.
 
+### Tipos de projeto
+
+O pipeline reconhece o **tipo** de cada projeto pelos arquivos (`pbidoc.py projetos`
+mostra `tipo=`), e as skills usam esse valor para saber como documentar — nunca pelo
+nome da pasta:
+
+| Tipo | O que tem | Como é documentado |
+| --- | --- | --- |
+| `completo` | modelo semântico local + relatório | modelo (tabelas, colunas, medidas, M, relacionamentos, RLS) + relatório |
+| `modelo` | só o modelo semântico | como `completo`, sem páginas |
+| `relatorio_conectado` | só o relatório (`<nome>.pbip` + `<nome>.Report`), ligado a um dataset publicado que **não** está no repositório: sem dados, sem modelo | conexão com o dataset, páginas, visuais (campos, ordenação, filtros, segmentações), medidas definidas no relatório (com DAX), campos do dataset usados, bookmarks, drillthrough/tooltips, navegação, tema, configurações e alertas de qualidade |
+
+Num relatório conectado, o que pertence ao dataset (tipos de dado, DAX das medidas do
+dataset, relacionamentos, RLS, Power Query) **não** é inventado: aparece só o que o
+relatório revela (nome, tabela e onde cada campo é usado). As **condições dos
+filtros** entram com seus valores (são regras do relatório); o estado salvo de
+matrizes e bookmarks, que guarda valores reais de linhas, é descartado.
+
+Um projeto pode ser mantido **só na sua máquina**: adicione a pasta ao
+`.git/info/exclude` e coloque a configuração dele em `projetos/<nome>/.pbidoc.json`.
+Projetos ignorados pelo git não entram no índice `docs/README.md` nem são registrados
+por `init`.
+
 ## 4. O que é gerado
 
-Tudo vai para `docs/<projeto>/`. Os dois formatos leem o mesmo
-`_descriptions.json`, então gerar os dois não custa o dobro.
+Tudo vai para `docs/<projeto>/`. Os três formatos leem o mesmo
+`_descriptions.json`, então gerar mais de um não custa o dobro. Quais formatos cada
+projeto gera é a chave `formatos` do `.pbidoc.json` (`md`, `docx`, `negocio`).
 
 ```
 docs/<projeto>/
@@ -124,7 +171,8 @@ docs/<projeto>/
 ├── 02-tabelas.md                  tabelas, colunas, colunas calculadas, RLS
 ├── 03-queries-m.md                parâmetros, incremental, código M passo a passo
 ├── 04-modelo-relacional.md        diagrama Mermaid + propriedades dos relacionamentos
-├── <TÍTULO> - Glossário de Dados.docx   tudo num arquivo só
+├── <TÍTULO> - Glossário de Dados.docx        glossário técnico num arquivo só
+├── <TÍTULO> - Documentação de Negócio.docx   dicionário de dados para a área de negócio
 ├── _descriptions.json             a prosa — o único arquivo que a skill escreve
 ├── _model.json                    manifesto extraído (gerado)
 └── _meta.json                     datas de criação e atualização (gerado)
@@ -145,23 +193,58 @@ um `erDiagram` Mermaid, que o GitHub e o VS Code renderizam nativamente — as
 tabelas de data automáticas do Power BI ficam de fora do diagrama e aparecem só
 como nota agregada.
 
-### Word
+### Relatório conectado (Markdown e Word)
 
-O `.docx` não é montado do zero: ele é uma cópia de
-`tools/pbidoc/assets/template.docx`, **gerado localmente** (não versionado) a
-partir de um documento de referência da sua equipe. Estilos, fontes embutidas,
-tema, cabeçalho com logotipo, rodapé e margens vêm byte a byte do original.
+Para `tipo=relatorio_conectado` os formatos `md` e `docx` geram a **documentação do
+relatório**: `README.md` + `01-paginas.md`, `02-medidas.md`, `03-campos-do-dataset.md`,
+`04-filtros-e-navegacao.md`, `05-conexao-e-alertas.md`, e um
+`<TÍTULO> - Documentação do Relatório.docx` com o mesmo conteúdo. O template Word é
+`template-relatorio.docx`, gerado de `docs/templates/Modelo - Documentacao de Relatorio.docx`
+(produzido pelo mesmo renderizador com um projeto fictício, por
+`python3 tools/pbidoc/make_modelo.py --tipo relatorio`). Os **alertas de qualidade**
+apontam inconsistências dos arquivos do relatório: página de tooltip inexistente,
+medida de relatório sem uso, bookmark sem botão, coluna de dado pessoal exibida, filtro
+divergente entre páginas, texto alternativo repetido.
 
-Fontes e cores do corpo do texto usam, por padrão, uma paleta neutra (Calibri +
-tons de cinza/azul); para usar a identidade visual da sua equipe, defina
-`estilo_docx` no `.pbidoc.json` — veja
-[`.claude/skills/pbi-doc-docx/reference/estrutura.md`](.claude/skills/pbi-doc-docx/reference/estrutura.md).
+### Word técnico (glossário de dados)
 
-Tabelas são a única adição ao repertório do documento de referência, que só tem
-parágrafos: sem elas, um dicionário com centenas de colunas ficaria ilegível. Como
-o Word não renderiza Mermaid, o diagrama vira a tabela de relacionamentos, com as
-mesmas informações e mais colunas. A navegação é feita pelo índice com links
-internos.
+Descreve o modelo: tabelas, colunas, medidas DAX, queries M, relacionamentos e RLS.
+Skill: `pbi-doc-docx`. Não é montado do zero: é uma cópia de
+`tools/pbidoc/assets/template-tecnico.docx`, **gerado localmente** (não versionado) a
+partir do documento-modelo `docs/templates/Modelo - Documentacao Tecnica.docx` (ou de
+um da sua equipe). Estilos, fontes embutidas, tema, cabeçalho, rodapé e margens vêm
+byte a byte do modelo. Como o Word não renderiza Mermaid, o diagrama vira a tabela de
+relacionamentos; a navegação é feita pelo índice com links internos.
+
+### Word de negócio
+
+Descreve o **relatório** para quem usa: informações gerais, objetivo e regras de
+negócio, estrutura do dashboard **página a página**, dicionário de dados (só as colunas
+que aparecem no relatório), medidas, filtros e segurança (RLS). Skill:
+`pbi-doc-negocio`; template `template-negocio.docx`, gerado de
+`docs/templates/Modelo - Documentacao de Negocio.docx`.
+
+Boa parte do que um documento de negócio pede **não existe nos arquivos do PBIP**:
+owners, objetivo do dashboard, público-alvo, links, datas, status, dúvidas
+frequentes. Isso vem do bloco `negocio` do `.pbidoc.json` (seção 7), preenchido por
+pessoas; enquanto um campo estiver vazio, o documento traz um marcador
+**`[PREENCHER: …]`** em negrito com realce amarelo (procure por `PREENCHER` com
+Ctrl+F). O assistente nunca inventa esses valores, e editar o `.docx` à mão não adianta
+— ele é regenerado a cada commit. `pbidoc.py status --escopo negocio` lista os campos
+que faltam.
+
+Os documentos-modelo de `docs/templates/` são versionados com `[PREENCHER: …]` no
+lugar de nomes de pessoas, e-mails, clientes e sistemas; troque-os pelos da sua
+equipe se quiser outro visual.
+
+### Paleta e fontes
+
+Fontes e cores do corpo do texto do Word técnico usam, por padrão, uma paleta neutra
+(Calibri + tons de cinza/azul); o Word de negócio usa a fonte e o verde do próprio
+modelo. Para outra identidade visual, defina `estilo_docx` no `.pbidoc.json` — veja
+[`.claude/skills/pbi-doc-docx/reference/estrutura.md`](.claude/skills/pbi-doc-docx/reference/estrutura.md)
+e
+[`.claude/skills/pbi-doc-negocio/reference/estrutura.md`](.claude/skills/pbi-doc-negocio/reference/estrutura.md).
 
 ## 5. Instalação
 
@@ -183,7 +266,9 @@ internos.
    interativamente na pasta do projeto uma vez e aceite a caixa de confirmação —
    sem isso, as permissões de `.claude/settings.json` são ignoradas nas execuções
    automáticas (`cd <repositorio> && claude`). No OpenCode, o equivalente é abrir
-   `opencode` na pasta uma vez.
+   `opencode` na pasta uma vez. No Antigravity, abra a pasta como workspace: ele lê
+   `AGENTS.md`, `.agents/skills/` e `.agents/hooks.json` (o hook assume `python3` no
+   PATH — confira com `/hooks` na CLI).
 
 3. **Adicionar um projeto PBIP** — veja [`projetos/README.md`](projetos/README.md).
    Depois, registre-o:
@@ -192,12 +277,19 @@ internos.
    python3 tools/pbidoc/pbidoc.py init
    ```
 
-4. **Gerar o template do Word** — só é necessário se você for usar o formato
-   `.docx` e tiver um documento de referência para herdar a identidade visual
-   (senão, o padrão neutro é usado sem nenhum passo extra):
+4. **Gerar os templates do Word** — só é necessário para os formatos `docx` e
+   `negocio`. Use os modelos de `docs/templates/` ou os da sua equipe (mesmo formato):
 
    ```bash
-   python3 tools/pbidoc/make_template.py "<caminho/para/referencia.docx>"
+   python3 tools/pbidoc/make_template.py "docs/templates/Modelo - Documentacao Tecnica.docx" --modelo tecnico
+   python3 tools/pbidoc/make_template.py "docs/templates/Modelo - Documentacao de Negocio.docx" --modelo negocio
+   python3 tools/pbidoc/make_template.py "docs/templates/Modelo - Documentacao de Relatorio.docx" --modelo relatorio
+   ```
+
+5. **Sincronizar as skills para o Antigravity** (o pre-commit também faz isso):
+
+   ```bash
+   python3 tools/sync_skills.py
    ```
 
 ### Requisitos
@@ -210,16 +302,17 @@ OpenCode) instalado e autenticado; chave de API só é necessária no plano B
 
 ## 6. Usar no chat
 
-As duas skills funcionam pedindo em linguagem natural — "documente o projeto
-`vendas`", "atualize a documentação das medidas", "gere o glossário em Word do
-projeto `rh`" — ou acionando-as pelo nome, dependendo do harness (`/pbi-doc-md` no
-Claude Code, por exemplo).
+As skills funcionam pedindo em linguagem natural — "documente o projeto `vendas`",
+"atualize a documentação das medidas", "gere o glossário em Word do projeto `rh`",
+"gere a documentação de negócio do `vendas`" — ou acionando-as pelo nome, dependendo
+do harness (`/pbi-doc-md` no Claude Code, por exemplo).
 
 | Skill | O que faz |
 | --- | --- |
 | `pbi-doc-md` | Gera ou atualiza os cinco arquivos Markdown em `docs/<projeto>/`. |
-| `pbi-doc-docx` | Gera ou atualiza o glossário único em `.docx`. |
-| as duas | Rodar as duas não duplica o custo: a prosa já escrita é reaproveitada integralmente. |
+| `pbi-doc-docx` | Gera ou atualiza o glossário técnico único em `.docx`. |
+| `pbi-doc-negocio` | Gera ou atualiza a documentação de negócio em `.docx` (com as páginas do relatório e os marcadores `[PREENCHER]`). |
+| várias | Rodar mais de uma não duplica o custo: a prosa já escrita é reaproveitada integralmente (o escopo de negócio só acrescenta as páginas). |
 
 Se houver mais de um projeto no repositório e o pedido for ambíguo, a skill
 pergunta qual (exceto em modo pre-commit, onde o projeto já vem determinado). Na
@@ -233,6 +326,9 @@ seguintes, ela lê apenas a lista de mudanças e escreve só o que falta.
 - Reescrever descrições cujo hash não mudou.
 - Ler arquivos TMDL diretamente — todo o contexto vem do arquivo de mudanças.
 - Ler segredos ou dados reais — veja [Guardrails](#2-guardrails).
+- Preencher o bloco `negocio` do `.pbidoc.json` ou inventar objetivo/público nas
+  descrições de página — isso é informação humana, marcada com `[PREENCHER: …]`.
+- Editar `.agents/skills/` (é cópia gerada de `.claude/skills/`).
 
 O estilo dos textos é definido em
 [`.claude/skills/pbi-doc-md/reference/estilo.md`](.claude/skills/pbi-doc-md/reference/estilo.md),
@@ -250,7 +346,7 @@ delas só para aquele projeto.
 | --- | --- | --- |
 | `projetos_dir` | `projetos` | Onde procurar as subpastas de projeto. |
 | `docs_dir` | `docs` | Pasta raiz da documentação. |
-| `formatos` | `["md", "docx"]` | Quais formatos gerar. Remova um para acelerar o pre-commit. |
+| `formatos` | `["md", "docx"]` | Quais formatos gerar: `md`, `docx` (técnico) e/ou `negocio`. Remova um para acelerar o pre-commit. |
 | `descrever_colunas` | `true` | Se `false`, só as colunas calculadas ganham descrição — reduz muito o custo da primeira execução. |
 | `modelo` | `sonnet` | Modelo usado na execução automática. |
 | `timeout` | `900` | Segundos até o hook desistir da chamada. |
@@ -261,7 +357,28 @@ delas só para aquele projeto.
 | `link_relatorio` | vazio | Endereço do relatório publicado, exibido nas informações gerais. |
 | `frequencia_atualizacao` | vazio | Texto livre, por exemplo "Diariamente às 6h". |
 | `objetivo` | vazio | Substitui o texto padrão da seção Objetivo. |
-| `estilo_docx` | paleta neutra | Fontes/cores do `.docx` — veja a seção 4. |
+| `estilo_docx` | paleta neutra | Fontes/cores dos `.docx` — veja a seção 4. Chaves do Word de negócio: `fonte_neg`, `fonte_neg_leve`, `fonte_toc`, `cor_neg_titulo`, `cor_neg_destaque`. |
+| `negocio` | vazio | Informações do documento de negócio que não existem no PBIP (tabela abaixo). |
+
+### O bloco `negocio`
+
+Dicts como `negocio` e `estilo_docx` são mesclados chave a chave: um projeto pode
+sobrescrever só `negocio.owner_tecnico` sem perder o resto. Campo vazio vira
+`[PREENCHER: …]` no Word de negócio.
+
+| Chave | O que informar |
+| --- | --- |
+| `link_relatorio`, `link_dataset` | Links do relatório publicado e do modelo semântico. |
+| `objetivo` | Qual problema de negócio o dashboard resolve. |
+| `owner_tecnico`, `owner_negocio` | Nome, área e e-mail dos responsáveis. |
+| `publico_area`, `publico_clientes`, `publico_perfis` | Áreas, clientes e perfis de usuários. |
+| `propriedade` | Conta proprietária e regra de compartilhamento. |
+| `plataforma_origem` | Sistema(s) de origem dos dados. |
+| `data_criacao_dashboard`, `data_atualizacao_dashboard` | Datas (dd/mm/aaaa) do dashboard. |
+| `frequencia_atualizacao` | Frequência agendada no serviço (ex.: 1h, diária). |
+| `status` | Em desenvolvimento, Ativo ou Descontinuado. |
+| `duvidas_frequentes` | Lista de `{"pergunta": "...", "resposta": "..."}`. |
+| `filtro_padrao_obs` | Filtros aplicados na origem, fora do Power BI. |
 
 Exemplo com dois projetos, um deles com overrides:
 
@@ -270,7 +387,10 @@ Exemplo com dois projetos, um deles com overrides:
   "modelo": "sonnet",
   "formatos": ["md", "docx"],
   "projetos": {
-    "vendas": { "titulo": "VENDAS", "modelo": "opus" },
+    "vendas": {
+      "titulo": "VENDAS", "modelo": "opus", "formatos": ["md", "negocio"],
+      "negocio": { "owner_tecnico": "Nome Sobrenome (Time de dados)", "status": "Ativo" }
+    },
     "rh": { "formatos": ["md"] }
   }
 }
@@ -321,8 +441,9 @@ um novo alias for lançado.
 ## 9. Pre-commit
 
 O hook está em `hooks/pre-commit`. Ele começa sempre pelos **guardrails**
-(bloqueante — veja a [seção 2](#2-guardrails)), depois segue três caminhos por
-projeto afetado, do mais barato para o mais caro:
+(bloqueante — veja a [seção 2](#2-guardrails)), depois espelha `.claude/skills` em
+`.agents/skills` (e adiciona ao commit) e segue três caminhos por projeto afetado, do
+mais barato para o mais caro:
 
 1. **Nenhum arquivo do PBIP no stage.** Sai imediatamente, sem tocar em nada. É o
    caso da maioria dos commits. Custo zero.
@@ -335,6 +456,10 @@ projeto afetado, do mais barato para o mais caro:
    **no mesmo commit**.
 
 Se o commit tocar em mais de um projeto, o hook processa cada um independentemente.
+A skill acionada depende de `formatos` do projeto: `negocio` → `pbi-doc-negocio`
+(escopo `negocio`, que já cobre o técnico); senão `md` → `pbi-doc-md`; senão
+`pbi-doc-docx`. Os campos `[PREENCHER]` do Word de negócio **não** são preenchidos
+pelo hook — dependem de pessoas (bloco `negocio`).
 
 Os arquivos observados são `*.tmdl`, `*.pbip`, `*.pbir`, `*.pbism`, `*.platform` e
 o conteúdo de `definition/` do relatório e do modelo semântico, dentro de
@@ -435,8 +560,13 @@ python3 tools/pbidoc/pbidoc.py --projeto <nome> render --md --docx
 | --- | --- |
 | `CLI não encontrada (claude/opencode)` | Hooks do git rodam com `PATH` reduzido. O hook já tenta `$HOME/.local/bin/claude`; se o seu estiver em outro lugar, acrescente o caminho em `hooks/pre-commit`. |
 | `Ignoring N permissions.allow entries … not been trusted` | Abra o assistente interativamente na pasta uma vez e aceite a caixa de confirmação. Não impede o funcionamento, mas remove o aviso. |
-| `Template ausente` | Rode `make_template.py` apontando para o `.docx` de referência (seção 5). |
-| `Nenhum projeto encontrado` | Confira se o PBIP está em `projetos/<nome>/` (ou na raiz, no modo de projeto único) e se há uma pasta `*.SemanticModel`. |
+| `Template ausente` | Rode `make_template.py ... --modelo tecnico` ou `--modelo negocio` apontando para o modelo em `docs/templates/` (seção 5). |
+| O Word de negócio está cheio de `[PREENCHER]` | Esperado: são informações que não estão no PBIP. Preencha `projetos.<nome>.negocio` no `.pbidoc.json` (`pbidoc.py status --escopo negocio` lista os campos). |
+| `.agents/skills está desatualizado` (`sync_skills.py --check`) | Alguém editou uma skill sem sincronizar (ou editou `.agents/skills` à mão). Rode `python3 tools/sync_skills.py` e commite. |
+| O Antigravity não bloqueia a leitura de um arquivo proibido | Confira se `.agents/hooks.json` foi carregado (`/hooks` na CLI) e se `python3` está no PATH. Teste o guard com `python3 tools/guardrails/check.py --path <arquivo>`. Sem o hook, só valem o pre-commit e a política do `AGENTS.md`. |
+| `Nenhum projeto encontrado` | Confira se o PBIP está em `projetos/<nome>/` (ou na raiz, no modo de projeto único) e se há uma pasta `*.SemanticModel` e/ou `*.Report`. |
+| Um projeto local não aparece no `docs/README.md` | Correto: projetos ignorados pelo git (`.git/info/exclude`) ficam fora do índice versionado. |
+| O relatório conectado sai sem tabelas, M ou RLS | Esperado: esses itens estão no dataset, não no repositório. Documente também o projeto do dataset (`completo`/`modelo`) se precisar deles. |
 | Leitura negada por "guardrails" | Correto — veja a [seção 2](#2-guardrails). Nunca contorne; se for um falso positivo, ajuste `tools/guardrails/policy.py` e abra um PR. |
 | O assistente excedeu o tempo | Aumente `timeout` no `.pbidoc.json`, ou baixe `limite_itens_precommit` para dividir o trabalho entre commits. |
 | O hook não dispara | Confira `git config core.hooksPath` (deve ser `hooks`) e se `hooks/pre-commit` tem permissão de execução. |
@@ -452,13 +582,15 @@ Todos aceitam `--root <caminho>` (raiz do repositório) e `--projeto NOME`
 | Comando | O que faz |
 | --- | --- |
 | `pbidoc.py init` | Registra em `.pbidoc.json` os projetos encontrados em `projetos/`. `--force` recomeça do zero. |
-| `pbidoc.py projetos` | Lista os projetos do repositório e quantas descrições faltam em cada um. |
+| `pbidoc.py projetos` | Lista os projetos (com o `tipo=` de cada um) e quantas descrições faltam. |
 | `pbidoc.py extract` | Lê TMDL e PBIR e grava o manifesto em `.pbidoc-cache/<nome>/model.json`. |
-| `pbidoc.py diff` | Lista o que precisa de descrição em `.pbidoc-cache/<nome>/changes.json`. `--limite N` limita o lote. |
-| `pbidoc.py merge <lotes>` | Mescla lotes de descrição, valida as chaves e carimba os hashes. `--limpar` apaga os lotes depois. |
-| `pbidoc.py render` | Gera a documentação e o índice `docs/README.md`. `--md`, `--docx` ou ambos; sem flags, usa `formatos`. |
-| `pbidoc.py status` | Quantas descrições estão preenchidas e quais estão marcadas para revisão. |
-| `make_template.py <ref.docx>` | Gera o template visual do Word a partir de um documento de referência. |
+| `pbidoc.py diff` | Lista o que precisa de descrição em `.pbidoc-cache/<nome>/changes.json`. `--limite N` limita o lote; `--escopo tecnico\|negocio` escolhe o catálogo. |
+| `pbidoc.py merge <lotes>` | Mescla lotes de descrição, valida as chaves e carimba os hashes. `--limpar` apaga os lotes depois; `--escopo` como acima. |
+| `pbidoc.py render` | Gera a documentação e o índice `docs/README.md`. `--md`, `--docx` (técnico), `--negocio`; sem flags, usa `formatos`. |
+| `pbidoc.py status` | Quantas descrições estão preenchidas, quais estão marcadas para revisão e, com `--escopo negocio`, quais campos `negocio` faltam. |
+| `make_template.py <modelo.docx> --modelo tecnico\|negocio\|relatorio` | Gera o template visual do Word a partir de um documento-modelo. |
+| `make_modelo.py [--tipo relatorio]` | Regenera `docs/templates/Modelo - Documentacao Tecnica.docx` (ou o de relatório) a partir do renderizador, com um projeto fictício. |
+| `sync_skills.py [--check]` | Espelha `.claude/skills` em `.agents/skills` (Antigravity); `--check` só verifica. |
 | `describe_api.py --projeto NOME --model X` | Plano B: escreve as descrições pela Claude API. |
 | `guardrails/check.py --path/--bash/--staged` | Testa a política de bloqueio de leitura. |
 
@@ -466,10 +598,10 @@ Todos aceitam `--root <caminho>` (raiz do repositório) e `--projeto NOME`
 
 ```bash
 python3 tools/pbidoc/pbidoc.py --projeto vendas extract
-python3 tools/pbidoc/pbidoc.py --projeto vendas diff
+python3 tools/pbidoc/pbidoc.py --projeto vendas diff --escopo negocio
 # a skill escreve .pbidoc-cache/vendas/patch-NN.json
-python3 tools/pbidoc/pbidoc.py merge .pbidoc-cache/vendas/patch-*.json --limpar
-python3 tools/pbidoc/pbidoc.py --projeto vendas render --md --docx
+python3 tools/pbidoc/pbidoc.py merge .pbidoc-cache/vendas/patch-*.json --limpar --escopo negocio
+python3 tools/pbidoc/pbidoc.py --projeto vendas render --md --docx --negocio
 ```
 
 ---
