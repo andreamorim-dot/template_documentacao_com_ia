@@ -5,6 +5,7 @@
     "AGENTS.md",
     ".claude/skills/pbi-doc-md/SKILL.md",
     ".claude/skills/pbi-doc-docx/SKILL.md",
+    ".claude/skills/pbi-doc-negocio/SKILL.md",
     ".claude/skills/guardrails/SKILL.md"
   ],
   "permission": {
@@ -38,7 +39,8 @@
     "bash": {
       "*": "ask",
       "python3 tools/pbidoc/*": "allow",
-      "python3 tools/guardrails/check.py *": "allow"
+      "python3 tools/guardrails/check.py *": "allow",
+      "python3 tools/sync_skills.py*": "allow"
     }
   }
 }
