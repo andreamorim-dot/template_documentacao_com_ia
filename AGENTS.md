@@ -58,6 +58,12 @@ O `tipo` escolhe o renderizador: `md` e `docx` geram os arquivos de modelo (`com
   (`python3 tools/pbidoc/make_template.py "<modelo.docx>" --modelo tecnico|negocio|relatorio`).
   Os modelos de `docs/templates/` trazem `[PREENCHER: …]` no lugar de nomes, e-mails,
   clientes e sistemas — a equipe pode trocá-los pelos seus próprios modelos.
+- Regras de formatação dos `.docx` (garantidas por `tools/pbidoc/docx_writer.py`; ao
+  alterar renderizadores ou modelos, preserve-as): sumário/índice é um campo TOC nativo
+  com números de página (níveis 1–2); **nenhum indicador (bookmark) visível** — o Google
+  Docs desenha uma fita azul em cada um, então só existem os `_Toc…` ocultos do sumário;
+  **nenhum título repetido** — itens com o mesmo rótulo são agrupados (tabela) sob um
+  único título.
 
 ## Estrutura
 

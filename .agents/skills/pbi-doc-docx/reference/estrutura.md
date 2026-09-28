@@ -56,7 +56,8 @@ parágrafos): sem elas, um dicionário com centenas de colunas ficaria ilegível
 1. **Capa** — título, subtítulo, `Criado em … | Atualizado em: …`, elaborado/revisado por
 2. **Objetivo**
 3. **Informações gerais** — identificação, o modelo em números, páginas do relatório
-4. **Índice** — links internos para seções, tabelas e medidas
+4. **Índice** — sumário nativo (campo TOC) com os títulos de nível 1 e 2 e o número
+   de página
 5. **Visão geral do modelo**
 6. **Modelo relacional** — tabela de relacionamentos e pontos de atenção
 7. **Tabelas** — por tabela: descrição, grão, papel, origem, colunas, colunas calculadas
@@ -70,8 +71,12 @@ Cada seção de nível 1 começa em nova página.
 
 - O Word não renderiza Mermaid: o diagrama vira a **tabela de relacionamentos**,
   com a mesma informação e mais colunas (filtro cruzado, estado).
-- Não há "botão de voltar": a navegação é feita pelo **Índice** com links internos
-  (indicadores/bookmarks do Word).
+- Não há "botão de voltar": a navegação é feita pelo **Índice**, um sumário nativo
+  (`TOC \o "1-2"`) com números de página. O Word o atualiza ao abrir (`updateFields`);
+  o Google Docs o converte no próprio sumário ("Atualizar sumário" se as páginas
+  mudarem).
+- **Nenhum indicador (bookmark) visível**: o Google Docs desenha uma fita azul antes de
+  cada um. Só os títulos do sumário recebem indicador, sempre oculto (`_Toc…`).
 - O conteúdo textual é o mesmo — os dois formatos leem o **mesmo** `_descriptions.json`.
 
 ## Relatório conectado

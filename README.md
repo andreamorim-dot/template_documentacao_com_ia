@@ -214,7 +214,8 @@ Skill: `pbi-doc-docx`. Não é montado do zero: é uma cópia de
 partir do documento-modelo `docs/templates/Modelo - Documentacao Tecnica.docx` (ou de
 um da sua equipe). Estilos, fontes embutidas, tema, cabeçalho, rodapé e margens vêm
 byte a byte do modelo. Como o Word não renderiza Mermaid, o diagrama vira a tabela de
-relacionamentos; a navegação é feita pelo índice com links internos.
+relacionamentos; a navegação é feita pelo índice, um sumário nativo com números de
+página (atualizado pelo Word ao abrir; no Google Docs, "Atualizar sumário").
 
 ### Word de negócio
 
