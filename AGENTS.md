@@ -83,6 +83,7 @@ tools/sync_skills.py            espelha .claude/skills em .agents/skills
 .agents/skills/                 CÓPIA gerada das skills (Antigravity) — não editar
 .agents/hooks.json              hook de guardrails do Antigravity
 hooks/pre-commit                mantém docs/ sincronizado a cada commit
+.gitattributes                  fim de linha LF em qualquer SO; .docx como binário
 ```
 
 ## Harnesses suportados

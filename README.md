@@ -92,7 +92,7 @@ docs/
 ├── vendas/                documentação do projeto "vendas"
 └── rh/                    documentação do projeto "rh"
 
-docs/templates/          documentos-modelo Word (técnico e negócio)
+docs/templates/          documentos-modelo Word (técnico, negócio e relatório)
 
 tools/
 ├── pbidoc/                pipeline determinístico (extração + render)
@@ -115,6 +115,7 @@ tools/
 opencode.json                     configuração do OpenCode
 hooks/pre-commit                  mantém docs/ e .agents/skills sincronizados
 AGENTS.md                         instruções universais (qualquer harness)
+.gitattributes                    fim de linha LF em qualquer sistema; .docx como binário
 ```
 
 ### Harnesses e skills
@@ -237,6 +238,13 @@ que faltam.
 Os documentos-modelo de `docs/templates/` são versionados com `[PREENCHER: …]` no
 lugar de nomes de pessoas, e-mails, clientes e sistemas; troque-os pelos da sua
 equipe se quiser outro visual.
+
+Nos três documentos Word, o sumário (ou índice) é um sumário nativo com os títulos de
+nível 1 e 2 e o número de página. O Word atualiza as páginas ao abrir o arquivo; no
+Google Docs, use "Atualizar sumário" se elas parecerem desatualizadas. Os títulos não
+levam indicadores visíveis (que o Google Docs mostraria como fitas azuis) e nunca se
+repetem: no dicionário de dados, colunas exibidas com o mesmo rótulo ficam numa tabela
+sob um único título.
 
 ### Paleta e fontes
 
@@ -561,7 +569,9 @@ python3 tools/pbidoc/pbidoc.py --projeto <nome> render --md --docx
 | --- | --- |
 | `CLI não encontrada (claude/opencode)` | Hooks do git rodam com `PATH` reduzido. O hook já tenta `$HOME/.local/bin/claude`; se o seu estiver em outro lugar, acrescente o caminho em `hooks/pre-commit`. |
 | `Ignoring N permissions.allow entries … not been trusted` | Abra o assistente interativamente na pasta uma vez e aceite a caixa de confirmação. Não impede o funcionamento, mas remove o aviso. |
-| `Template ausente` | Rode `make_template.py ... --modelo tecnico` ou `--modelo negocio` apontando para o modelo em `docs/templates/` (seção 5). |
+| `Template ausente` | Rode `make_template.py ... --modelo tecnico`, `--modelo negocio` ou `--modelo relatorio` apontando para o modelo em `docs/templates/` (seção 5). |
+| O sumário do Word/Google Docs mostra páginas erradas | Os números gravados são uma estimativa. O Word os recalcula ao abrir (confirme a atualização de campos); no Google Docs, clique no sumário e use "Atualizar sumário". |
+| Muitos arquivos aparecem como modificados sem mudança real | Diferença de fim de linha (CRLF do Windows × LF). O `.gitattributes` fixa LF; num clone antigo, rode uma vez `git add --renormalize .` ou restaure os arquivos com `git checkout -- <arquivo>`. |
 | O Word de negócio está cheio de `[PREENCHER]` | Esperado: são informações que não estão no PBIP. Preencha `projetos.<nome>.negocio` no `.pbidoc.json` (`pbidoc.py status --escopo negocio` lista os campos). |
 | `.agents/skills está desatualizado` (`sync_skills.py --check`) | Alguém editou uma skill sem sincronizar (ou editou `.agents/skills` à mão). Rode `python3 tools/sync_skills.py` e commite. |
 | O Antigravity não bloqueia a leitura de um arquivo proibido | Confira se `.agents/hooks.json` foi carregado (`/hooks` na CLI) e se `python3` está no PATH. Teste o guard com `python3 tools/guardrails/check.py --path <arquivo>`. Sem o hook, só valem o pre-commit e a política do `AGENTS.md`. |
