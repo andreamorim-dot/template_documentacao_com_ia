@@ -340,7 +340,7 @@ def _estrutura(b, man, prosa, rel):
             titulo += " (dica de ferramenta)"
         elif p.get("oculta"):
             titulo += " (oculta)"
-        b.heading(3, titulo)
+        b.heading(2, titulo)
         b.item(_txt(prosa.pagina(p["nome"])), rotulo="Descrição")
 
         visuais = [v for v in p.get("visuais", [])
@@ -386,6 +386,27 @@ def _estrutura(b, man, prosa, rel):
                 b.item(s, nivel=1)
 
 
+def _tipo_coluna(rel, tabela, campo):
+    if rel.conectado:
+        return "definido no dataset (não disponível neste projeto)"
+    return rc.tipo_rotulo(rel.colunas[(tabela, campo)]["tipo"])
+
+
+def _titulo_medida(rel, tabela, nome):
+    rot = rel.rotulo(tabela, nome)
+    return rot if rot == nome else "%s (%s)" % (rot, nome)
+
+
+def _titulos_unicos(itens, titulo):
+    """{item: título} garantindo títulos únicos: se dois itens gerarem o mesmo título,
+    ambos recebem o nome da tabela como complemento."""
+    contagem = {}
+    for it in itens:
+        contagem[titulo(it).lower()] = contagem.get(titulo(it).lower(), 0) + 1
+    return {it: titulo(it) if contagem[titulo(it).lower()] == 1
+            else "%s — %s" % (titulo(it), it[0]) for it in itens}
+
+
 def _dicionario(b, man, prosa, rel):
     b.heading(1, "Dicionário de dados", quebra_antes=True)
     if rel.conectado:
@@ -398,16 +419,25 @@ def _dicionario(b, man, prosa, rel):
     else:
         b.paragrafo("Dimensões (colunas) que aparecem no relatório — em visuais, segmentações "
                     "de dados e filtros.")
+    # Um título por rótulo: colunas diferentes exibidas com o mesmo rótulo ("Aluno",
+    # "Cargo"…) ficam agrupadas numa tabela sob um único título, nunca em títulos repetidos.
+    grupos = {}
     for tabela, campo in sorted(existentes, key=lambda c: (rel.rotulo(*c).lower(), c)):
-        b.heading(2, rel.rotulo(tabela, campo))
-        b.paragrafo(_txt(prosa.coluna(tabela, campo)))
-        if rel.conectado:
+        grupos.setdefault(rel.rotulo(tabela, campo).lower(), []).append((tabela, campo))
+    for colunas in grupos.values():
+        rotulo = rel.rotulo(*colunas[0])
+        b.heading(2, b.titulo_livre(rotulo, "campo"))
+        if len(colunas) == 1:
+            tabela, campo = colunas[0]
+            b.paragrafo(_txt(prosa.coluna(tabela, campo)))
             b.paragrafo(["Campo: ", ("mono", _col_ref(tabela, campo)),
-                         " · Tipo: definido no dataset (não disponível neste projeto)"], sz=20)
+                         " · Tipo: %s" % _tipo_coluna(rel, tabela, campo)], sz=20)
             continue
-        col = rel.colunas[(tabela, campo)]
-        b.paragrafo(["Campo: ", ("mono", _col_ref(tabela, campo)),
-                     " · Tipo: %s" % rc.tipo_rotulo(col["tipo"])], sz=20)
+        b.paragrafo("Campos diferentes exibidos no relatório com o rótulo “%s”:" % rotulo)
+        b.tabela(["Campo", "Descrição", "Tipo"],
+                 [[W.Mono(_col_ref(t, c)), _txt(prosa.coluna(t, c)), _tipo_coluna(rel, t, c)]
+                  for t, c in colunas],
+                 pesos=[3, 5, 2] if rel.conectado else [3, 6, 1], sz=20)
     if faltantes:
         b.paragrafo("Campos referenciados pelo relatório que não existem no modelo: %s."
                     % ", ".join(_col_ref(*c) for c in faltantes), italico=True)
@@ -421,11 +451,11 @@ def _medidas_conectado(b, man, prosa, rel):
         return
     b.paragrafo("Medidas que aparecem no relatório. As definidas no próprio relatório trazem o "
                 "cálculo; as do dataset têm o código no dataset de origem.")
+    titulos = _titulos_unicos(usadas, lambda c: _titulo_medida(rel, *c))
     for tabela, nome in sorted(usadas, key=lambda c: rel.rotulo(*c).lower()):
         ext = rel.extensoes.get((tabela, nome))
-        rot = rel.rotulo(tabela, nome)
         chave = catalog.key_medida(tabela, nome)
-        b.heading(2, rot if rot == nome else "%s (%s)" % (rot, nome))
+        b.heading(2, b.titulo_livre(titulos[(tabela, nome)], "medida"))
         b.item(_txt(prosa.medida(tabela, nome, "descricao")), rotulo="Definição", num_id=1,
                leve=True)
         regra = prosa.medida(tabela, nome, "regra")
@@ -454,10 +484,11 @@ def _medidas(b, man, prosa, rel):
         b.paragrafo("O relatório não exibe medidas; abaixo estão todas as medidas do modelo.")
         medidas = man["medidas"]
     varias_fontes = len(man["projeto"]["fontes_dados"]) > 1
+    titulos = _titulos_unicos([(m["tabela"], m["nome"]) for m in medidas],
+                              lambda c: _titulo_medida(rel, *c))
     for m in medidas:
         chave = catalog.key_medida(m["tabela"], m["nome"])
-        rot = rel.rotulo(m["tabela"], m["nome"])
-        b.heading(2, rot if rot == m["nome"] else "%s (%s)" % (rot, m["nome"]))
+        b.heading(2, b.titulo_livre(titulos[(m["tabela"], m["nome"])], "medida"))
         b.item(_txt(prosa.medida(m["tabela"], m["nome"], "descricao")),
                rotulo="Definição", num_id=1, leve=True)
         b.item(_txt(prosa.medida(m["tabela"], m["nome"], "regra")),

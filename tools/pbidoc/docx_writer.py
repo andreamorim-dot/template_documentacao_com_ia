@@ -16,7 +16,6 @@ Padrão de fábrica:
     Heading3  Calibri 14pt #374151         código    Consolas 9pt sobre #f3f4f6
 """
 
-import hashlib
 import os
 import re
 import zipfile
@@ -91,15 +90,9 @@ def esc(texto):
     return (str(texto).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
 
 
-def nome_bookmark(chave):
-    """Nome de indicador válido no Word: letras/dígitos/_ e no máximo 40 caracteres."""
-    base = re.sub(r"[^0-9A-Za-z_]", "_", chave or "")
-    if not base or not base[0].isalpha():
-        base = "b_" + base
-    if len(base) > 32:
-        base = base[:32]
-    sufixo = hashlib.sha1((chave or "").encode("utf-8")).hexdigest()[:6]
-    return "%s_%s" % (base, sufixo)
+# Níveis de título que entram no sumário. Só esses recebem indicador (bookmark), sempre
+# oculto (`_Toc…`): o Google Docs desenha uma fita azul em todo indicador visível.
+NIVEIS_SUMARIO = 2
 
 
 def _fontes(nome):
@@ -142,10 +135,19 @@ class Body:
     def cor_cabecalho_tabela(self):
         return COR_TITULO
 
+    def fonte_tabela(self):
+        return FONTE_LEVE
+
+    def fonte_cabecalho_tabela(self):
+        return FONTE
+
+    def fonte_sumario(self):
+        return FONTE
+
     def __init__(self):
         self._partes = []
-        self._bookmark_id = 0
-        self._bookmarks = set()
+        self._sumario = []          # (nivel, texto, bookmark, página estimada)
+        self._pagina = 1
 
     # ------------------------------------------------------------------ blocos
     def raw(self, xml):
@@ -154,17 +156,20 @@ class Body:
     def _p(self, ppr, conteudo):
         self._partes.append("<w:p>%s%s</w:p>" % (ppr, conteudo))
 
-    def _bookmark_xml(self, chave):
-        if not chave:
+    def _marca_titulo(self, nivel, texto, quebra_antes):
+        """Registra o título no sumário e devolve o seu indicador oculto (`_Toc…`).
+
+        A página é só uma estimativa (1 + quebras de página antes do título); o Word
+        recalcula ao abrir (`updateFields`) e o Google Docs gera o próprio sumário."""
+        if quebra_antes:
+            self._pagina += 1
+        if nivel > NIVEIS_SUMARIO:
             return ""
-        nome = nome_bookmark(chave)
-        if nome in self._bookmarks:
-            return ""
-        self._bookmarks.add(nome)
-        self._bookmark_id += 1
-        i = self._bookmark_id
-        return ('<w:bookmarkStart w:colFirst="0" w:colLast="0" w:name="%s" w:id="%d"/>'
-                '<w:bookmarkEnd w:id="%d"/>' % (nome, i, i))
+        i = len(self._sumario) + 1
+        nome = "_Toc%d" % (100000000 + i)
+        self._sumario.append((nivel, texto, nome, self._pagina))
+        return ('<w:bookmarkStart w:id="%d" w:name="%s"/><w:bookmarkEnd w:id="%d"/>'
+                % (i, nome, i))
 
     def paragrafo(self, texto="", fonte=None, sz=24, cor=None, negrito=False,
                   italico=False, alinhamento="both", espaco_depois=200, linha=276,
@@ -173,6 +178,7 @@ class Body:
         cor = cor if cor is not None else COR_TEXTO
         ppr = ["<w:pPr>"]
         if quebra_antes:
+            self._pagina += 1
             ppr.append('<w:pageBreakBefore w:val="1"/>')
         ppr.append('<w:spacing w:after="%d" w:line="%d" w:lineRule="auto"/>' % (espaco_depois, linha))
         ppr.append('<w:jc w:val="%s"/>' % alinhamento)
@@ -193,7 +199,9 @@ class Body:
                 run(texto, fonte=FONTE, sz=20, cor=COR_SUAVE))
 
     def heading(self, nivel, texto, chave=None, quebra_antes=False):
-        estilo = "Heading%d" % max(1, min(6, nivel))
+        """`chave` é aceita por compatibilidade; não gera mais indicador visível."""
+        nivel = max(1, min(6, nivel))
+        estilo = "Heading%d" % nivel
         ppr = ["<w:pPr>", '<w:pStyle w:val="%s"/>' % estilo]
         if quebra_antes:
             ppr.append('<w:pageBreakBefore w:val="1"/>')
@@ -208,7 +216,7 @@ class Body:
             r = run(texto, fonte=FONTE, sz=28, cor=COR_H3)
         else:
             r = run(texto, fonte=FONTE, sz=24, cor=COR_SUAVE, negrito=True)
-        self._p("".join(ppr), self._bookmark_xml(chave) + r)
+        self._p("".join(ppr), self._marca_titulo(nivel, texto, quebra_antes) + r)
 
     def rotulo(self, rotulo, texto, sz=24):
         """Parágrafo no padrão do glossário: `**Rótulo**: texto`."""
@@ -252,12 +260,68 @@ class Body:
         self._p('<w:pPr><w:spacing w:after="%d" w:line="240" w:lineRule="auto"/></w:pPr>' % altura,
                 "")
 
-    def link_interno(self, texto, chave, sz=22):
-        alvo = nome_bookmark(chave)
-        conteudo = ('<w:hyperlink w:anchor="%s">%s</w:hyperlink>'
-                    % (alvo, run(texto, fonte=FONTE_LEVE, sz=sz, cor=COR_SUBTITULO)))
-        self._p('<w:pPr><w:spacing w:after="40" w:line="240" w:lineRule="auto"/>'
-                '<w:ind w:left="240"/><w:jc w:val="left"/></w:pPr>', conteudo)
+    def titulo_livre(self, texto, complemento):
+        """`texto` se ainda não há título igual no sumário; senão `texto (complemento)`.
+        Evita tópicos repetidos no sumário (ex.: página "Status" e campo "Status")."""
+        usados = {t.lower() for _n, t, _a, _p in self._sumario}
+        return texto if texto.lower() not in usados else "%s (%s)" % (texto, complemento)
+
+    # ------------------------------------------------------------------ sumário
+    def titulo_sumario(self, texto="Índice", quebra_antes=False):
+        """Título do sumário com a aparência de um Heading 1, mas sem o estilo: assim ele
+        não aparece dentro do próprio sumário."""
+        ppr = "<w:pPr>"
+        if quebra_antes:
+            self._pagina += 1
+            ppr += '<w:pageBreakBefore w:val="1"/>'
+        ppr += '<w:spacing w:before="240" w:after="120"/><w:keepNext w:val="1"/></w:pPr>'
+        self._p(ppr, run(texto, fonte=FONTE, sz=40, cor=COR_TITULO, negrito=True))
+
+    def sumario(self):
+        """Reserva o lugar do sumário; preenchido em `xml()` com os títulos de nível 1–2."""
+        self._partes.append(None)
+
+    def _sumario_xml(self):
+        """Sumário nativo, na mesma estrutura que o Word grava: campo TOC com páginas,
+        entradas com hyperlink para `_Toc…`, tabulação pontilhada e `PAGEREF`. O Google
+        Docs converte isso no seu sumário nativo; o Word o atualiza ao abrir."""
+        if not self._sumario:
+            return ""
+        fonte = self.fonte_sumario()
+        pos = LARGURA_UTIL - 10
+        paras = []
+        n = len(self._sumario)
+        for i, (nivel, texto, alvo, pagina) in enumerate(self._sumario):
+            b = '<w:b w:val="1"/><w:bCs w:val="1"/>' if nivel == 1 else ""
+            rpr_ = ('<w:rPr><w:rFonts w:ascii="{f}" w:cs="{f}" w:eastAsia="{f}" w:hAnsi="{f}"/>{b}'
+                    '<w:color w:val="000000"/><w:sz w:val="22"/><w:szCs w:val="22"/>'
+                    '<w:u w:val="none"/></w:rPr>').format(f=fonte, b=b)
+            inicio = ""
+            if i == 0:
+                inicio = ('<w:r><w:fldChar w:fldCharType="begin"/></w:r>'
+                          '<w:r><w:instrText xml:space="preserve"> TOC \\o &quot;1-%d&quot; '
+                          '\\h \\z \\u </w:instrText></w:r>'
+                          '<w:r><w:fldChar w:fldCharType="separate"/></w:r>' % NIVEIS_SUMARIO)
+            fim = '<w:r><w:fldChar w:fldCharType="end"/></w:r>' if i == n - 1 else ""
+            paras.append(
+                '<w:p><w:pPr><w:pStyle w:val="TOC%d"/>'
+                '<w:tabs><w:tab w:val="right" w:leader="dot" w:pos="%d"/></w:tabs>'
+                '<w:spacing w:before="60" w:after="0" w:line="240" w:lineRule="auto"/>'
+                '<w:ind w:left="%d"/></w:pPr>%s'
+                '<w:hyperlink w:anchor="%s" w:history="1">'
+                '<w:r>%s<w:t xml:space="preserve">%s</w:t></w:r>'
+                '<w:r>%s<w:tab/></w:r>'
+                '<w:r>%s<w:fldChar w:fldCharType="begin"/></w:r>'
+                '<w:r>%s<w:instrText xml:space="preserve"> PAGEREF %s \\h </w:instrText></w:r>'
+                '<w:r>%s<w:fldChar w:fldCharType="separate"/></w:r>'
+                '<w:r>%s<w:t>%d</w:t></w:r>'
+                '<w:r>%s<w:fldChar w:fldCharType="end"/></w:r>'
+                '</w:hyperlink>%s</w:p>'
+                % (nivel, pos, 360 * (nivel - 1), inicio, alvo, rpr_, esc(texto), rpr_,
+                   rpr_, rpr_, alvo, rpr_, rpr_, pagina, rpr_, fim))
+        return ('<w:sdt><w:sdtPr><w:docPartObj><w:docPartGallery w:val="Table of Contents"/>'
+                '<w:docPartUnique w:val="1"/></w:docPartObj></w:sdtPr><w:sdtContent>%s'
+                '</w:sdtContent></w:sdt>' % "".join(paras))
 
     # ------------------------------------------------------------------ tabelas
     def tabela(self, cabecalho, linhas, pesos=None, sz=18):
@@ -283,7 +347,8 @@ class Body:
         xml.append('<w:tr><w:trPr><w:cantSplit w:val="1"/><w:tblHeader/></w:trPr>')
         for i, titulo in enumerate(cabecalho):
             xml.append(self._celula(titulo, larguras[i], sz=sz, negrito=True,
-                                    cor=COR_BRANCO, fundo=self.cor_cabecalho_tabela(), fonte=FONTE))
+                                    cor=COR_BRANCO, fundo=self.cor_cabecalho_tabela(),
+                                    fonte=self.fonte_cabecalho_tabela()))
         xml.append("</w:tr>")
 
         for j, linha in enumerate(linhas):
@@ -292,7 +357,8 @@ class Body:
             for i in range(n):
                 valor = linha[i] if i < len(linha) else ""
                 mono = isinstance(valor, Mono)
-                xml.append(self._celula(str(valor), larguras[i], sz=sz, fundo=fundo, mono=mono))
+                xml.append(self._celula(str(valor), larguras[i], sz=sz, fundo=fundo, mono=mono,
+                                        fonte=self.fonte_tabela()))
             xml.append("</w:tr>")
         xml.append("</w:tbl>")
         self._partes.append("".join(xml))
@@ -312,7 +378,8 @@ class Body:
                    run(texto, fonte=fonte, sz=sz, cor=cor, negrito=negrito, mono=mono)))
 
     def xml(self):
-        return "".join(self._partes)
+        toc = self._sumario_xml()
+        return "".join(toc if p is None else p for p in self._partes)
 
 
 # ------------------------------------------------------------ documento de negócio
@@ -329,9 +396,14 @@ class BodyNegocio(Body):
     def cor_cabecalho_tabela(self):
         return COR_NEG_TITULO
 
-    def __init__(self):
-        super().__init__()
-        self._sumario = []
+    def fonte_tabela(self):
+        return FONTE_NEG
+
+    def fonte_cabecalho_tabela(self):
+        return FONTE_NEG
+
+    def fonte_sumario(self):
+        return FONTE_TOC
 
     def _r(self, texto, negrito=False, cor=None, sz=None, fonte=None, realce=None,
            italico=False, mono=False):
@@ -387,21 +459,14 @@ class BodyNegocio(Body):
                 self._r(texto, negrito=True, cor=COR_NEG_DESTAQUE, sz=40))
         self._p('<w:pPr><w:rPr/></w:pPr>', "")
 
-    def sumario(self):
-        """Reserva o lugar do sumário; preenchido em `xml()` com os títulos do documento."""
-        self._partes.append(None)
-
     # ------------------------------------------------------------------ títulos
     def heading(self, nivel, texto, chave=None, quebra_antes=False):
         nivel = max(1, min(6, nivel))
-        chave = chave or "neg_h%d_%d_%s" % (nivel, len(self._sumario), texto)
         ppr = ['<w:pPr><w:pStyle w:val="Heading%d"/>' % nivel]
         if quebra_antes:
             ppr.append('<w:pageBreakBefore w:val="1"/>')
         ppr.append("<w:rPr/></w:pPr>")
-        marca = self._bookmark_xml(chave)
-        if marca:
-            self._sumario.append((nivel, texto, nome_bookmark(chave)))
+        marca = self._marca_titulo(nivel, texto, quebra_antes)
         self._p("".join(ppr),
                 marca + '<w:r><w:rPr><w:rtl w:val="0"/></w:rPr>'
                         '<w:t xml:space="preserve">%s</w:t></w:r>' % esc(texto))
@@ -445,40 +510,6 @@ class BodyNegocio(Body):
     def vazio(self):
         self._p('<w:pPr><w:rPr/></w:pPr>', "")
 
-    # ------------------------------------------------------------------ sumário
-    def _sumario_xml(self):
-        if not self._sumario:
-            return ""
-        estilo = ('<w:rFonts w:ascii="{f}" w:cs="{f}" w:eastAsia="{f}" w:hAnsi="{f}"/>{b}'
-                  '<w:color w:val="000000"/><w:sz w:val="22"/><w:szCs w:val="22"/>'
-                  '<w:u w:val="none"/>')
-        paras = []
-        n = len(self._sumario)
-        for i, (nivel, texto, alvo) in enumerate(self._sumario):
-            b = '<w:b w:val="1"/><w:bCs w:val="1"/>' if nivel == 1 else ""
-            rpr_ = estilo.format(f=FONTE_TOC, b=b)
-            ind = '<w:ind w:left="%d" w:firstLine="0"/>' % (360 * (nivel - 1)) if nivel > 1 else ""
-            inicio = ""
-            if i == 0:
-                inicio = ('<w:r><w:fldChar w:fldCharType="begin"/>'
-                          '<w:instrText xml:space="preserve"> TOC \\h \\u \\z \\n \\t '
-                          '&quot;Heading 1,1,Heading 2,2,Heading 3,3,&quot;</w:instrText>'
-                          '<w:fldChar w:fldCharType="separate"/></w:r>')
-            fim = '<w:r><w:fldChar w:fldCharType="end"/></w:r>' if i == n - 1 else ""
-            paras.append(
-                '<w:p><w:pPr><w:widowControl w:val="0"/>'
-                '<w:spacing w:before="60" w:line="240" w:lineRule="auto"/>%s</w:pPr>'
-                '%s<w:hyperlink w:anchor="%s"><w:r><w:rPr>%s<w:rtl w:val="0"/></w:rPr>'
-                '<w:t xml:space="preserve">%s</w:t></w:r></w:hyperlink>%s</w:p>'
-                % (ind, inicio, alvo, rpr_, esc(texto), fim))
-        return ('<w:sdt><w:sdtPr><w:docPartObj><w:docPartGallery w:val="Table of Contents"/>'
-                '<w:docPartUnique w:val="1"/></w:docPartObj></w:sdtPr><w:sdtContent>%s'
-                '</w:sdtContent></w:sdt>' % "".join(paras))
-
-    def xml(self):
-        toc = self._sumario_xml()
-        return "".join(toc if p is None else p for p in self._partes)
-
 
 class Mono(str):
     """Marca um valor de célula para ser renderizado em fonte monoespaçada."""
@@ -505,8 +536,32 @@ def inalterado(template_path, destino, body_xml):
     return atual == documento(template_path, body_xml)
 
 
+# Elementos de `w:settings` que, pelo schema, vêm depois de `w:updateFields`.
+_DEPOIS_DE_UPDATE_FIELDS = ("hdrShapeDefaults", "footnotePr", "endnotePr", "compat", "docVars",
+                            "rsids", "mathPr", "attachedSchema", "themeFontLang",
+                            "clrSchemeMapping", "doNotIncludeSubdocsInStats",
+                            "doNotAutoCompressPictures", "forceUpgrade", "captions",
+                            "readModeInkLockDown", "smartTagType", "schemaLibrary",
+                            "shapeDefaults", "doNotEmbedSmartTags", "decimalSymbol",
+                            "listSeparator")
+
+
+def _com_update_fields(settings):
+    """Liga `w:updateFields`: o Word recalcula o sumário (páginas) ao abrir o arquivo."""
+    if "updateFields" in settings:
+        return settings
+    tag = '<w:updateFields w:val="true"/>'
+    posicoes = [m.start() for m in re.finditer(
+        r"<(?:w|m):(?:%s)\b" % "|".join(_DEPOIS_DE_UPDATE_FIELDS), settings)]
+    if posicoes:
+        i = min(posicoes)
+        return settings[:i] + tag + settings[i:]
+    return settings.replace("</w:settings>", tag + "</w:settings>")
+
+
 def gravar(template_path, destino, body_xml):
-    """Copia o template trocando apenas o corpo de `word/document.xml`."""
+    """Copia o template trocando o corpo de `word/document.xml` (e ligando a atualização
+    de campos em `word/settings.xml`, para o sumário sair com as páginas certas no Word)."""
     origem = zipfile.ZipFile(template_path)
     doc = origem.read("word/document.xml").decode("utf-8")
     if MARCADOR not in doc:
@@ -517,6 +572,9 @@ def gravar(template_path, destino, body_xml):
         for info in origem.infolist():
             if info.filename == "word/document.xml":
                 saida.writestr(info.filename, doc.encode("utf-8"))
+            elif info.filename == "word/settings.xml":
+                settings = origem.read(info.filename).decode("utf-8")
+                saida.writestr(info, _com_update_fields(settings).encode("utf-8"))
             else:
                 saida.writestr(info, origem.read(info.filename))
     origem.close()

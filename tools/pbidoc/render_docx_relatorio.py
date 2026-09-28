@@ -93,13 +93,12 @@ def render(man, cfg, descriptions, destino, meta):
                 % (man["projeto"]["pbip"] or man["projeto"]["report"]))
     b.espaco(240)
 
-    b.heading(1, "Índice", chave="sec_indice")
-    for chave, titulo, _blocos in secoes:
-        b.link_interno(titulo, "sec_" + chave)
+    b.titulo_sumario("Índice")
+    b.sumario()
     b.espaco(120)
 
-    for chave, titulo, blocos in secoes:
-        b.heading(1, titulo, chave="sec_" + chave, quebra_antes=True)
+    for _chave, titulo, blocos in secoes:
+        b.heading(1, titulo, quebra_antes=True)
         for bloco in blocos:
             _bloco(b, bloco)
 

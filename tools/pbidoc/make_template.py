@@ -83,6 +83,8 @@ def build(referencia, destino, modelo="tecnico"):
     abertura = _abrir_documento(doc)
     sect = _sect_pr(doc)
     logo = _logo_capa(doc) if modelo == "negocio" else ""
+    # sem indicadores (bookmarks): o Google Docs desenha uma fita azul em cada um
+    logo = re.sub(r"<w:bookmark(?:Start|End)\b[^>]*/>", "", logo)
     # o logotipo mantém a sua relação de imagem; nenhuma outra é reaproveitada
     extras = tuple(re.findall(r'r:embed="([^"]+)"', logo))
     novo_doc = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'

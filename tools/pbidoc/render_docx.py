@@ -105,29 +105,8 @@ def _informacoes(b, man, cfg):
 
 
 def _indice(b, man):
-    b.heading(1, "Índice", chave="sec_indice", quebra_antes=True)
-    b.paragrafo("Clique em qualquer item para ir direto à seção correspondente.",
-                italico=True, cor=W.COR_SUAVE, sz=20)
-
-    b.heading(3, "Seções")
-    for rotulo, chave in (("Objetivo", "sec_objetivo"),
-                          ("Informações gerais", "sec_infos"),
-                          ("Visão geral do modelo", "sec_visao"),
-                          ("Modelo relacional", "sec_modelo"),
-                          ("Tabelas", "sec_tabelas"),
-                          ("Medidas", "sec_medidas"),
-                          ("Queries M (Power Query)", "sec_queries"),
-                          ("Segurança em nível de linha (RLS)", "sec_rls")):
-        b.link_interno(rotulo, chave)
-
-    b.heading(3, "Tabelas")
-    for t in man["tabelas"]:
-        b.link_interno(t["nome"], catalog.key_tabela(t["nome"]))
-
-    b.heading(3, "Medidas")
-    for m in man["medidas"]:
-        b.link_interno("%s  (%s)" % (m["nome"], m["tabela"]),
-                       catalog.key_medida(m["tabela"], m["nome"]))
+    b.titulo_sumario("Índice", quebra_antes=True)
+    b.sumario()
 
 
 def _visao_geral(b, prosa):
